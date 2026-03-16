@@ -1,0 +1,1 @@
+cmake -Bbuild -DCMAKE_TOOLCHAIN_FILE=D:\program\GithubRepo\vcpkg\scripts\buildsystems\vcpkg.cmake -Dglfw3_DIR="D:\program\GithubRepo\glfw\out\lib\cmake\glfw3" -Dglm_DIR="D:\program\GithubRepo\glm\out\share\glm" -DVTK_DIR="D:\program\GithubRepo\VTK-9.6.0\out\lib\cmake\vtk-9.6" . && cmake --build build --config Debug && .\build\Debug\LBM_Particle.exe
