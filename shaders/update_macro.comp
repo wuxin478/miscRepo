@@ -88,6 +88,15 @@ struct Particle {
     vec4 color;
 };
 
+struct LagrangianPoint {
+    vec4 position;
+};
+
+struct LagrangianData {
+    vec4 velocity;
+    vec4 force;
+};
+
 layout (std430, binding = 0) uniform SimulateUBO {
     uint Nx;
     uint Ny;
@@ -129,6 +138,14 @@ layout(std430, binding = 5) buffer FOld {
 //layout(std430, binding = 6) buffer FNew {
 //    vecQ f_new[];
 //};
+
+layout(std430, binding = 7) buffer LagrangianPoints {
+    LagrangianPoint lagrangianPoints[];
+};
+
+layout(std430, binding = 8) buffer LagrangianDataBuffer {
+    LagrangianData lagrangianData[];
+};
 
 vecQ f_eq(uint ijz) {
     return createVecQ(rho[ijz], createVecQ(vel[ijz].xyz), dot(vel[ijz].xyz, vel[ijz].xyz));

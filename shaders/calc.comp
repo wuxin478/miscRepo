@@ -112,6 +112,15 @@ struct Particle {
     vec4 color;     // rgb: color, a: life (total lifetime in seconds)
 };
 
+struct LagrangianPoint {
+    vec4 position;
+};
+
+struct LagrangianData {
+    vec4 velocity;
+    vec4 force;
+};
+
 layout (std430, binding = 0) uniform SimulateUBO {
     uint Nx;
     uint Ny;
@@ -152,6 +161,14 @@ layout(std430, binding = 5) buffer DDF {
 
 layout(std430, binding = 6) buffer BorderForce {
     int bfs[];
+};
+
+layout(std430, binding = 7) buffer LagrangianPoints {
+    LagrangianPoint lagrangianPoints[];
+};
+
+layout(std430, binding = 8) buffer LagrangianDataBuffer {
+    LagrangianData lagrangianData[];
 };
 
 layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -402,7 +419,7 @@ void main()
     
     vec3 p0 = particle.position.xyz;
     float age = particle.position.w;
-    float life = particle.color.a * 10;
+    float life = particle.color.a;
 
     if(ubo.particleRho != 1.0f) { // FORCE_FILED
 		const float drho = ubo.particleRho-1.0f;
@@ -447,7 +464,7 @@ void main()
         float rand_x = random(seed);
         float rand_y = random(hash(seed + 1u));
         float rand_z = random(hash(seed + 2u));
-        float rand_life = 2.0f + random(hash(seed + 3u)) * 3.0f;
+        float rand_life = 8.0f + random(hash(seed + 3u)) * 12.0f;
         
         p.x = 2.0f + rand_x * (ubo.Nx - 4.0f);
         p.y = 2.0f + rand_y * (ubo.Ny - 4.0f);

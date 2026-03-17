@@ -55,6 +55,8 @@ const uint32_t Q = 19;
 
 const int MAX_FRAMES_IN_FLIGHT = 1;
 
+const uint32_t lagrangianPointCount = 4096;
+
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation",
     "VK_LAYER_LUNARG_monitor"
@@ -195,6 +197,15 @@ struct Vertex {
     }
 };
 
+struct LagrangianPoint {
+    alignas(16) glm::vec4 position;
+};
+
+struct LagrangianData {
+    alignas(16) glm::vec4 velocity;
+    alignas(16) glm::vec4 force;
+};
+
 class ComputeShaderApplication {
 public:
     void run() {
@@ -253,6 +264,7 @@ private:
     VkPipeline diagnosticPipeline;
     VkPipeline wireframePipeline;
     VkPipeline skyboxPipeline;
+    VkPipeline lagrangianPipeline;
     VkPipeline computePipeline;
     VkPipeline initPipeline;
     VkPipeline collideAndStreamPipeline;
@@ -273,6 +285,11 @@ private:
     std::vector<VkDeviceMemory> DDFBuffersMemory;
     std::vector<VkBuffer> borderForceBuffers;
     std::vector<VkDeviceMemory> borderForceBuffersMemory;
+
+    std::vector<VkBuffer> lagrangianPointsBuffers;
+    std::vector<VkDeviceMemory> lagrangianPointsBuffersMemory;
+    std::vector<VkBuffer> lagrangianDataBuffers;
+    std::vector<VkDeviceMemory> lagrangianDataBuffersMemory;
 
     std::vector<VkBuffer> wireframeBuffers;
     std::vector<VkDeviceMemory> wireframeBuffersMemory;
@@ -532,6 +549,7 @@ private:
         createGraphicsPipeline();
         createSkyBoxPipeline();
         createComputePipeline();
+        createLagrangianPipeline();
         createCommandPool();
         createDepthResources();
         createFramebuffers();
@@ -656,6 +674,7 @@ private:
         vkDestroyPipeline(device, diagnosticPipeline, nullptr);
         vkDestroyPipeline(device, wireframePipeline, nullptr);
         vkDestroyPipeline(device, skyboxPipeline, nullptr);
+        vkDestroyPipeline(device, lagrangianPipeline, nullptr);
         vkDestroyPipelineLayout(device, graphicsPipelineLayout, nullptr);
 
         vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
@@ -686,6 +705,10 @@ private:
             vkFreeMemory(device, DDFBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, borderForceBuffers[i], nullptr);
             vkFreeMemory(device, borderForceBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, lagrangianPointsBuffers[i], nullptr);
+            vkFreeMemory(device, lagrangianPointsBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, lagrangianDataBuffers[i], nullptr);
+            vkFreeMemory(device, lagrangianDataBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, wireframeBuffers[i], nullptr);
             vkFreeMemory(device, wireframeBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, wireframeIndexBuffers[i], nullptr);
@@ -1054,7 +1077,14 @@ private:
         samplerLayoutBinding.pImmutableSamplers = nullptr;
         samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        std::array<VkDescriptorSetLayoutBinding, 2> bindings = { uboLayoutBinding, samplerLayoutBinding };
+        VkDescriptorSetLayoutBinding lagrangianPointsLayoutBinding{};
+        lagrangianPointsLayoutBinding.binding = 2;
+        lagrangianPointsLayoutBinding.descriptorCount = 1;
+        lagrangianPointsLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        lagrangianPointsLayoutBinding.pImmutableSamplers = nullptr;
+        lagrangianPointsLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        std::array<VkDescriptorSetLayoutBinding, 3> bindings = { uboLayoutBinding, samplerLayoutBinding, lagrangianPointsLayoutBinding };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -1066,7 +1096,7 @@ private:
     }
 
     void createComputeDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 7> layoutBindings{};
+        std::array<VkDescriptorSetLayoutBinding, 9> layoutBindings{};
 
         // ubo
         layoutBindings[0].binding = 0;
@@ -1110,11 +1140,26 @@ private:
         layoutBindings[5].pImmutableSamplers = nullptr;
         layoutBindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+        // borderForce
         layoutBindings[6].binding = 6;
         layoutBindings[6].descriptorCount = 1;
         layoutBindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         layoutBindings[6].pImmutableSamplers = nullptr;
         layoutBindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // lagrangianPoints
+        layoutBindings[7].binding = 7;
+        layoutBindings[7].descriptorCount = 1;
+        layoutBindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[7].pImmutableSamplers = nullptr;
+        layoutBindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT;
+
+        // lagrangianData
+        layoutBindings[8].binding = 8;
+        layoutBindings[8].descriptorCount = 1;
+        layoutBindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[8].pImmutableSamplers = nullptr;
+        layoutBindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1584,6 +1629,118 @@ private:
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
     }
 
+    void createLagrangianPipeline() {
+        auto vertShaderCode = readFile("shaders/lagrangian_vert.spv");
+        auto fragShaderCode = readFile("shaders/lagrangian_frag.spv");
+
+        VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
+        VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+
+        VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
+        vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertShaderStageInfo.module = vertShaderModule;
+        vertShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+        fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fragShaderStageInfo.module = fragShaderModule;
+        fragShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
+
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInputInfo.vertexBindingDescriptionCount = 0;
+        vertexInputInfo.vertexAttributeDescriptionCount = 0;
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+        inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.scissorCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo rasterizer{};
+        rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizer.depthClampEnable = VK_FALSE;
+        rasterizer.rasterizerDiscardEnable = VK_FALSE;
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer.lineWidth = 1.0f;
+        rasterizer.cullMode = VK_CULL_MODE_NONE;
+        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterizer.depthBiasEnable = VK_FALSE;
+
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.sampleShadingEnable = VK_FALSE;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkPipelineDepthStencilStateCreateInfo depthStencil{};
+        depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depthStencil.depthTestEnable = VK_TRUE;
+        depthStencil.depthWriteEnable = VK_TRUE;
+        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+        depthStencil.depthBoundsTestEnable = VK_FALSE;
+        depthStencil.minDepthBounds = 0.0f;
+        depthStencil.maxDepthBounds = 1.0f;
+        depthStencil.stencilTestEnable = VK_FALSE;
+        depthStencil.front = {};
+        depthStencil.back = {};
+
+        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachment.blendEnable = VK_FALSE;
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.logicOpEnable = VK_FALSE;
+        colorBlending.logicOp = VK_LOGIC_OP_COPY;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &colorBlendAttachment;
+        colorBlending.blendConstants[0] = 0.0f;
+        colorBlending.blendConstants[1] = 0.0f;
+        colorBlending.blendConstants[2] = 0.0f;
+        colorBlending.blendConstants[3] = 0.0f;
+
+        std::vector<VkDynamicState> dynamicStates = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR
+        };
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+        dynamicState.pDynamicStates = dynamicStates.data();
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = shaderStages;
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pDepthStencilState = &depthStencil;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = graphicsPipelineLayout;
+        pipelineInfo.renderPass = renderPass;
+        pipelineInfo.subpass = 0;
+        pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &lagrangianPipeline) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create lagrangian pipeline!");
+        }
+
+        vkDestroyShaderModule(device, fragShaderModule, nullptr);
+        vkDestroyShaderModule(device, vertShaderModule, nullptr);
+    }
+
     void createComputePipeline() {
         {
             VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
@@ -1989,6 +2146,77 @@ private:
             vkDestroyBuffer(device, stagingBuffer, nullptr);
             vkFreeMemory(device, stagingBufferMemory, nullptr);
         }
+
+        // Lagrangian Points - generate sphere point cloud
+        {
+            std::vector<LagrangianPoint> lagrangianPoints(lagrangianPointCount);
+            std::vector<LagrangianData> lagrangianData(lagrangianPointCount);
+
+            float centerX = Nx / 2.0f;
+            float centerY = Ny / 2.0f;
+            float centerZ = Nz / 2.0f;
+            float radius = 10.0f;
+
+            // Generate sphere point cloud using Fibonacci lattice
+            for (uint32_t i = 0; i < lagrangianPointCount; i++) {
+                float y = 1.0f - (i / float(lagrangianPointCount - 1)) * 2.0f;
+                float radiusAtY = sqrt(1.0f - y * y);
+                float theta = i * 2.4f;
+
+                float x = cos(theta) * radiusAtY;
+                float z = sin(theta) * radiusAtY;
+
+                lagrangianPoints[i].position = glm::vec4(
+                    centerX + x * radius,
+                    centerY + y * radius,
+                    centerZ + z * radius,
+                    1.0f
+                );
+
+                lagrangianData[i].velocity = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+                lagrangianData[i].force = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+            }
+
+            VkDeviceSize pointsBufferSize = sizeof(LagrangianPoint) * lagrangianPointCount;
+            VkDeviceSize dataBufferSize = sizeof(LagrangianData) * lagrangianPointCount;
+
+            lagrangianPointsBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            lagrangianPointsBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+            lagrangianDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            lagrangianDataBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+
+            VkBuffer stagingBuffer;
+            VkDeviceMemory stagingBufferMemory;
+            void* data;
+
+            // Create and upload lagrangianPointsBuffer
+            createBuffer(pointsBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+            vkMapMemory(device, stagingBufferMemory, 0, pointsBufferSize, 0, &data);
+            memcpy(data, lagrangianPoints.data(), (size_t)pointsBufferSize);
+            vkUnmapMemory(device, stagingBufferMemory);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                createBuffer(pointsBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, lagrangianPointsBuffers[i], lagrangianPointsBuffersMemory[i]);
+                copyBuffer(stagingBuffer, lagrangianPointsBuffers[i], pointsBufferSize);
+            }
+
+            vkDestroyBuffer(device, stagingBuffer, nullptr);
+            vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+            // Create and upload lagrangianDataBuffer
+            createBuffer(dataBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+            vkMapMemory(device, stagingBufferMemory, 0, dataBufferSize, 0, &data);
+            memcpy(data, lagrangianData.data(), (size_t)dataBufferSize);
+            vkUnmapMemory(device, stagingBufferMemory);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                createBuffer(dataBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, lagrangianDataBuffers[i], lagrangianDataBuffersMemory[i]);
+                copyBuffer(stagingBuffer, lagrangianDataBuffers[i], dataBufferSize);
+            }
+
+            vkDestroyBuffer(device, stagingBuffer, nullptr);
+            vkFreeMemory(device, stagingBufferMemory, nullptr);
+        }
     }
 
     void createIndexBuffers() {
@@ -2048,7 +2276,7 @@ private:
             // Initialize particles
             std::default_random_engine rndEngine((unsigned)time(nullptr));
             std::uniform_real_distribution<float> rndDist(0.0f, 1.0f);
-            std::uniform_real_distribution<float> rndLife(2.0f, 5.0f);
+            std::uniform_real_distribution<float> rndLife(8.0f, 20.0f);
 
             // Initial particle positions on a circle
             particle_count = Nx * Ny * Nz / 8;
@@ -2175,10 +2403,7 @@ private:
 
             std::vector<uint> flags(Nxyz, 0);
             parallel_for(Nxyz, [&](uint32_t index) { uint x = index % Nx, y = (index - x) / Nx % Ny, z = index / Nx / Ny;
-                bool isObstacle = cube(x, y, z, glm::vec3(Nx / 2, Ny / 2, Nz / 2), 64.0f);
-                if (isObstacle) {
-                    flags[index] = TYPE_S;
-                } else if (x == 0 || x == Nx - 1 || y == 0 || y == Ny - 1) {
+                if (x == 0 || x == Nx - 1 || y == 0 || y == Ny - 1) {
                     flags[index] = TYPE_S;
                 } else if (z == 0) {
                     flags[index] = TYPE_E;
@@ -2285,19 +2510,19 @@ private:
     void createDescriptorPool() {
         std::array<VkDescriptorPoolSize, 3> poolSizes{};
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) * 10;
+        poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) * 20;
 
         poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) * 10;
+        poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) * 20;
 
         poolSizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[2].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) * 10;
+        poolSizes[2].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) * 20;
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.poolSizeCount = poolSizes.size();
         poolInfo.pPoolSizes = poolSizes.data();
-        poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) * 10;
+        poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) * 20;
 
         if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
             throw std::runtime_error("failed to create descriptor pool!");
@@ -2329,7 +2554,12 @@ private:
             imageInfo.imageView = skyboxImageView;
             imageInfo.sampler = skyboxSampler;
 
-            std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+            VkDescriptorBufferInfo lagrangianPointsBufferInfo{};
+            lagrangianPointsBufferInfo.buffer = lagrangianPointsBuffers[i];
+            lagrangianPointsBufferInfo.offset = 0;
+            lagrangianPointsBufferInfo.range = sizeof(LagrangianPoint) * lagrangianPointCount;
+
+            std::array<VkWriteDescriptorSet, 3> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = graphicsDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -2345,6 +2575,14 @@ private:
             descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             descriptorWrites[1].descriptorCount = 1;
             descriptorWrites[1].pImageInfo = &imageInfo;
+
+            descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[2].dstSet = graphicsDescriptorSets[i];
+            descriptorWrites[2].dstBinding = 2;
+            descriptorWrites[2].dstArrayElement = 0;
+            descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[2].descriptorCount = 1;
+            descriptorWrites[2].pBufferInfo = &lagrangianPointsBufferInfo;
 
             vkUpdateDescriptorSets(device, descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
         }
@@ -2369,7 +2607,7 @@ private:
             uniformBufferInfo.offset = 0;
             uniformBufferInfo.range = sizeof(SimulateUBO);
 
-            std::array<VkWriteDescriptorSet, 7> descriptorWrites{};
+            std::array<VkWriteDescriptorSet, 9> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = computeDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -2455,6 +2693,32 @@ private:
             descriptorWrites[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[6].descriptorCount = 1;
             descriptorWrites[6].pBufferInfo = &borderForceBufferInfo;
+
+            VkDescriptorBufferInfo lagrangianPointsBufferInfo{};
+            lagrangianPointsBufferInfo.buffer = lagrangianPointsBuffers[i];
+            lagrangianPointsBufferInfo.offset = 0;
+            lagrangianPointsBufferInfo.range = sizeof(LagrangianPoint) * lagrangianPointCount;
+
+            descriptorWrites[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[7].dstSet = computeDescriptorSets[i];
+            descriptorWrites[7].dstBinding = 7;
+            descriptorWrites[7].dstArrayElement = 0;
+            descriptorWrites[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[7].descriptorCount = 1;
+            descriptorWrites[7].pBufferInfo = &lagrangianPointsBufferInfo;
+
+            VkDescriptorBufferInfo lagrangianDataBufferInfo{};
+            lagrangianDataBufferInfo.buffer = lagrangianDataBuffers[i];
+            lagrangianDataBufferInfo.offset = 0;
+            lagrangianDataBufferInfo.range = sizeof(LagrangianData) * lagrangianPointCount;
+
+            descriptorWrites[8].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[8].dstSet = computeDescriptorSets[i];
+            descriptorWrites[8].dstBinding = 8;
+            descriptorWrites[8].dstArrayElement = 0;
+            descriptorWrites[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[8].descriptorCount = 1;
+            descriptorWrites[8].pBufferInfo = &lagrangianDataBufferInfo;
 
             vkUpdateDescriptorSets(device, descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
         }
@@ -2713,6 +2977,28 @@ private:
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, &shaderStorageBuffers[currentFrame], offsets);
 
             vkCmdDraw(commandBuffer, particle_count, 1, 0, 0);
+        }
+
+        // Lagrangian Points rendering
+        {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, lagrangianPipeline);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &graphicsDescriptorSets[currentFrame], 0, nullptr);
+
+            VkViewport viewport{};
+            viewport.x = 0.0f;
+            viewport.y = 0.0f;
+            viewport.width = (float)swapChainExtent.width;
+            viewport.height = (float)swapChainExtent.height;
+            viewport.minDepth = 0.0f;
+            viewport.maxDepth = 1.0f;
+            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+            VkRect2D scissor{};
+            scissor.offset = { 0, 0 };
+            scissor.extent = swapChainExtent;
+            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+            vkCmdDraw(commandBuffer, lagrangianPointCount, 1, 0, 0);
         }
 
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
