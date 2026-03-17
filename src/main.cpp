@@ -1932,6 +1932,9 @@ private:
                     float t = std::min(dist / maxDist, 1.0f);
                     vels[index + 2 * Nxyz] = 0.5f * (1.0f - t) + 0.05f * t;
                 }
+                else if (z == Nz - 1) {
+                    // vels[index + 2 * Nxyz] = 0.0f;
+                }
             });
 
             // create staging buffer

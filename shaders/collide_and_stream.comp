@@ -283,11 +283,18 @@ void main()
         apply_moving_boundaries(fhn, nbs); // apply Dirichlet velocity boundaries if necessary (reads velocities of only neighboring boundary cells, which do not change during simulation)
     }
     
-    apply_inflow_boundary(fhn, index); // apply inflow boundary conditions for TYPE_E boundaries
-    apply_outflow_boundary(fhn, nbs); // apply outflow boundary conditions (zero-gradient extrapolation)
+    //apply_inflow_boundary(fhn, index); // apply inflow boundary conditions for TYPE_E boundaries
+    //apply_outflow_boundary(fhn, nbs); // apply outflow boundary conditions (zero-gradient extrapolation)
     
     float rhon, uxn, uyn, uzn; // calculate local density and velocity for collision
-    calculate_rho_u(fhn, rhon, uxn, uyn, uzn); // calculate density and velocity fields from fi
+    if(flagsn_bo==TYPE_E) {
+        rhon = rhos[            index]; // apply preset velocity/density
+        uxn  = vels[            index];
+        uyn  = vels[   ubo.Nxyz+index];
+        uzn  = vels[2u*ubo.Nxyz+index];
+    } else {
+        calculate_rho_u(fhn, rhon, uxn, uyn, uzn); // calculate density and velocity fields from fi
+    }
     
     float fxn=ubo.fx, fyn=ubo.fy, fzn=ubo.fz; // force starts as constant volume force, can be modified before call of calculate_forcing_terms(...)
     float Fin[Q]; // forcing terms
@@ -308,11 +315,13 @@ void main()
 		calculate_forcing_terms(uxn, uyn, uzn, fxn, fyn, fzn, Fin); // calculate volume force terms Fin from velocity field (Guo forcing, Krueger p.233f)
     }
 
-    // NO EQUILIBRIUM BOUNDARIES
-    rhos[            index] = rhon; // update density field
-    vels[            index] = uxn; // update velocity field
-    vels[   ubo.Nxyz+index] = uyn;
-    vels[2u*ubo.Nxyz+index] = uzn;
+    // EQUILIBRIUM BOUNDARIES
+    if(flagsn_bo!=TYPE_E) { // only update fields for non-TYPE_E cells
+        rhos[            index] = rhon; // update density field
+        vels[            index] = uxn; // update velocity field
+        vels[   ubo.Nxyz+index] = uyn;
+        vels[2u*ubo.Nxyz+index] = uzn;
+    }
     
     float feq[Q]; // equilibrium DDFs
     calculate_f_eq(rhon, uxn, uyn, uzn, feq); // calculate equilibrium DDFs
@@ -335,7 +344,7 @@ void main()
     
     const float c_tau = fma(w, -0.5f, 1.0f);
 	for(uint q=0u; q<Q; q++) Fin[q] *= c_tau;
-    for(uint q=0u; q<Q; q++) fhn[q] = fma(1.0f-w, fhn[q], fma(w, feq[q], Fin[q])); // perform collision (SRT)
+    for(uint q=0u; q<Q; q++) fhn[q] = flagsn_bo==TYPE_E ? feq[q] : fma(1.0f-w, fhn[q], fma(w, feq[q], Fin[q])); // perform collision (SRT)
 
     store_f(index, fhn, nbs, ubo.t); // perform streaming (part 1)
 }
