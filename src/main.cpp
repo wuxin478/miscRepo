@@ -4,6 +4,9 @@
 #include <ktx.h>
 #include <ktxvulkan.h>
 
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_vulkan.h"
 
 #define GLM_FORCE_RADIANS
 #include <glm/glm.hpp>
@@ -117,21 +120,24 @@ struct SimulateUBO {
     alignas(4) float fx = 0.0f;
     alignas(4) float fy = 0.0f;
     alignas(4) float fz = 0.0f;
+    alignas(4) float dt = 0.0f;
     alignas(4) uint32_t t = 0;
+    alignas(4) uint32_t render_mode = 0;
 };
 
 struct RenderingUBO {
     uint32_t Nx = 0;
     uint32_t Ny = 0;
     uint32_t Nz = 0;
+    uint32_t render_mode = 0;
     alignas(16) glm::mat4 model;
     alignas(16) glm::mat4 view;
     alignas(16) glm::mat4 proj;
 };
 
 struct Particle {
-    alignas(16) glm::vec4 position;
-    alignas(16) glm::vec4 color;
+    alignas(16) glm::vec4 position;  // xyz: position, w: age (current lifetime in seconds)
+    alignas(16) glm::vec4 color;     // rgb: color, a: life (total lifetime in seconds)
 
     static VkVertexInputBindingDescription getBindingDescription() {
         VkVertexInputBindingDescription bindingDescription{};
@@ -208,6 +214,7 @@ private:
     bool framebufferResized = false;
     bool isInit = false;
     uint32_t currentTime = 0;
+    bool show_diagnostic_particles = false;
 
     VkInstance instance;
     VkDebugUtilsMessengerEXT debugMessenger;
@@ -243,6 +250,7 @@ private:
     VkPipelineLayout graphicsPipelineLayout;
     VkPipelineLayout computePipelineLayout;
     VkPipeline graphicsPipeline;
+    VkPipeline diagnosticPipeline;
     VkPipeline wireframePipeline;
     VkPipeline skyboxPipeline;
     VkPipeline computePipeline;
@@ -284,6 +292,7 @@ private:
     std::vector<void*> renderingUBOBuffersMapped;
 
     VkDescriptorPool descriptorPool;
+    VkDescriptorPool imguiDescriptorPool;
     std::vector<VkDescriptorSet> graphicsDescriptorSets;
     std::vector<VkDescriptorSet> computeDescriptorSets;
 
@@ -429,6 +438,7 @@ private:
         glfwSetCursorPosCallback(window, mouse_move_callback);
         glfwSetScrollCallback(window, scroll_callback);
         glfwSetMouseButtonCallback(window, mouse_button_callback);
+        glfwSetKeyCallback(window, key_callback);
 
         lastTime = glfwGetTime();
     }
@@ -487,7 +497,7 @@ private:
     static void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
         auto app = reinterpret_cast<ComputeShaderApplication*>(glfwGetWindowUserPointer(window));
 
-        if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+        if (button == GLFW_MOUSE_BUTTON_MIDDLE && action == GLFW_PRESS) {
             app->mouseFree = 1 - app->mouseFree;
             if (!app->mouseFree) {
                 glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
@@ -497,6 +507,14 @@ private:
             else {
                 glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
             }
+        }
+    }
+
+    static void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+        auto app = reinterpret_cast<ComputeShaderApplication*>(glfwGetWindowUserPointer(window));
+
+        if (key == GLFW_KEY_D && action == GLFW_PRESS) {
+            app->show_diagnostic_particles = !app->show_diagnostic_particles;
         }
     }
 
@@ -528,12 +546,83 @@ private:
         createCommandBuffers();
         createComputeCommandBuffers();
         createSyncObjects();
+        initImGui();
+    }
+
+    void initImGui() {
+        VkDescriptorPoolSize pool_sizes[] = {
+            { VK_DESCRIPTOR_TYPE_SAMPLER, 1000 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 },
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1000 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1000 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1000 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1000 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1000 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 },
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000 },
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000 },
+            { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1000 }
+        };
+        VkDescriptorPoolCreateInfo pool_info = {};
+        pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        pool_info.maxSets = 1000 * IM_ARRAYSIZE(pool_sizes);
+        pool_info.poolSizeCount = (uint32_t)IM_ARRAYSIZE(pool_sizes);
+        pool_info.pPoolSizes = pool_sizes;
+        if (vkCreateDescriptorPool(device, &pool_info, nullptr, &imguiDescriptorPool) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create imgui descriptor pool!");
+        }
+
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+        ImGui::StyleColorsDark();
+
+        ImGui_ImplGlfw_InitForVulkan(window, true);
+        ImGui_ImplVulkan_InitInfo init_info = {};
+        init_info.Instance = instance;
+        init_info.PhysicalDevice = physicalDevice;
+        init_info.Device = device;
+        init_info.QueueFamily = findQueueFamilies(physicalDevice).graphicsAndComputeFamily.value();
+        init_info.Queue = graphicsQueue;
+        init_info.RenderPass = renderPass;
+        init_info.PipelineCache = VK_NULL_HANDLE;
+        init_info.DescriptorPool = imguiDescriptorPool;
+        init_info.Subpass = 0;
+        init_info.MinImageCount = 2;
+        init_info.ImageCount = static_cast<uint32_t>(swapChainImages.size());
+        init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+        init_info.Allocator = nullptr;
+        init_info.CheckVkResultFn = nullptr;
+        ImGui_ImplVulkan_Init(&init_info);
+
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+        ImGui_ImplVulkan_CreateFontsTexture();
+        endSingleTimeCommands(commandBuffer);
     }
 
     void mainLoop() {
         while (!glfwWindowShouldClose(window)) {
             static double start_time = glfwGetTime();
             glfwPollEvents();
+            
+            ImGui_ImplVulkan_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+            
+            {
+                ImGui::Begin("Particle Settings");
+                ImGui::Checkbox("Diagnostic Particles", &show_diagnostic_particles);
+                ImGui::Text("Press 'D' to toggle diagnostic mode");
+                ImGui::Text("FPS: %.1f", 1000.0f / lastFrameTime);
+                ImGui::Text("Particles: %d", particle_count);
+                ImGui::End();
+            }
+            
+            ImGui::Render();
+            
             drawFrame();
             // We want to animate the particle system using the last frames time to get smooth, frame-rate independent animation
             double currentTime = glfwGetTime();
@@ -564,6 +653,7 @@ private:
         cleanupSwapChain();
 
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
+        vkDestroyPipeline(device, diagnosticPipeline, nullptr);
         vkDestroyPipeline(device, wireframePipeline, nullptr);
         vkDestroyPipeline(device, skyboxPipeline, nullptr);
         vkDestroyPipelineLayout(device, graphicsPipelineLayout, nullptr);
@@ -606,7 +696,12 @@ private:
             vkFreeMemory(device, skyboxIndexBuffersMemory[i], nullptr);
         }
 
+        ImGui_ImplVulkan_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+
         vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+        vkDestroyDescriptorPool(device, imguiDescriptorPool, nullptr);
 
         vkDestroyDescriptorSetLayout(device, graphicsDescriptorSetLayout, nullptr);
         vkDestroyDescriptorSetLayout(device, computeDescriptorSetLayout, nullptr);
@@ -1119,14 +1214,14 @@ private:
         VkPipelineDepthStencilStateCreateInfo depthStencil{};
         depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
         depthStencil.depthTestEnable = VK_TRUE;
-        depthStencil.depthWriteEnable = VK_TRUE;
+        depthStencil.depthWriteEnable = VK_FALSE;
         depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
         depthStencil.depthBoundsTestEnable = VK_FALSE;
-        depthStencil.minDepthBounds = 0.0f; // Optional
-        depthStencil.maxDepthBounds = 1.0f; // Optional
+        depthStencil.minDepthBounds = 0.0f;
+        depthStencil.maxDepthBounds = 1.0f;
         depthStencil.stencilTestEnable = VK_FALSE;
-        depthStencil.front = {}; // Optional
-        depthStencil.back = {}; // Optional
+        depthStencil.front = {};
+        depthStencil.back = {};
 
         VkPipelineColorBlendAttachmentState colorBlendAttachment{};
         colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -1135,7 +1230,7 @@ private:
         colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
         colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
         colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
-        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
         colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
 
         VkPipelineColorBlendStateCreateInfo colorBlending{};
@@ -1192,6 +1287,73 @@ private:
             }
         }
 
+        // diagnostic particles
+        {
+            bindingDescription = Particle::getBindingDescription();
+            attributeDescriptions = Particle::getAttributeDescriptions();
+            vertexInputInfo.vertexBindingDescriptionCount = 1;
+            vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+            vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+            vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+            inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+
+            VkPipelineDepthStencilStateCreateInfo diagnosticDepthStencil{};
+            diagnosticDepthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            diagnosticDepthStencil.depthTestEnable = VK_TRUE;
+            diagnosticDepthStencil.depthWriteEnable = VK_TRUE;
+            diagnosticDepthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+            diagnosticDepthStencil.depthBoundsTestEnable = VK_FALSE;
+            diagnosticDepthStencil.minDepthBounds = 0.0f;
+            diagnosticDepthStencil.maxDepthBounds = 1.0f;
+            diagnosticDepthStencil.stencilTestEnable = VK_FALSE;
+            diagnosticDepthStencil.front = {};
+            diagnosticDepthStencil.back = {};
+
+            VkPipelineColorBlendAttachmentState diagnosticColorBlendAttachment{};
+            diagnosticColorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            diagnosticColorBlendAttachment.blendEnable = VK_FALSE;
+            diagnosticColorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+            diagnosticColorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            diagnosticColorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            diagnosticColorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+            diagnosticColorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            diagnosticColorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+
+            VkPipelineColorBlendStateCreateInfo diagnosticColorBlending{};
+            diagnosticColorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            diagnosticColorBlending.logicOpEnable = VK_FALSE;
+            diagnosticColorBlending.logicOp = VK_LOGIC_OP_COPY;
+            diagnosticColorBlending.attachmentCount = 1;
+            diagnosticColorBlending.pAttachments = &diagnosticColorBlendAttachment;
+            diagnosticColorBlending.blendConstants[0] = 0.0f;
+            diagnosticColorBlending.blendConstants[1] = 0.0f;
+            diagnosticColorBlending.blendConstants[2] = 0.0f;
+            diagnosticColorBlending.blendConstants[3] = 0.0f;
+
+            VkGraphicsPipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            pipelineInfo.flags = VK_PIPELINE_CREATE_DERIVATIVE_BIT;
+            pipelineInfo.stageCount = 2;
+            pipelineInfo.pStages = particleShaderStages;
+            pipelineInfo.pVertexInputState = &vertexInputInfo;
+            pipelineInfo.pInputAssemblyState = &inputAssembly;
+            pipelineInfo.pViewportState = &viewportState;
+            pipelineInfo.pRasterizationState = &rasterizer;
+            pipelineInfo.pMultisampleState = &multisampling;
+            pipelineInfo.pDepthStencilState = &diagnosticDepthStencil;
+            pipelineInfo.pColorBlendState = &diagnosticColorBlending;
+            pipelineInfo.pDynamicState = &dynamicState;
+            pipelineInfo.layout = graphicsPipelineLayout;
+            pipelineInfo.renderPass = renderPass;
+            pipelineInfo.subpass = 0;
+            pipelineInfo.basePipelineHandle = graphicsPipeline;
+            pipelineInfo.basePipelineIndex = -1;
+
+            if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &diagnosticPipeline) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create diagnostic pipeline!");
+            }
+        }
+
         // wireframe
         {
             bindingDescription = Vertex::getBindingDescription();
@@ -1201,6 +1363,18 @@ private:
             vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
             vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
             inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+
+            VkPipelineDepthStencilStateCreateInfo wireframeDepthStencil{};
+            wireframeDepthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            wireframeDepthStencil.depthTestEnable = VK_TRUE;
+            wireframeDepthStencil.depthWriteEnable = VK_TRUE;
+            wireframeDepthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+            wireframeDepthStencil.depthBoundsTestEnable = VK_FALSE;
+            wireframeDepthStencil.minDepthBounds = 0.0f;
+            wireframeDepthStencil.maxDepthBounds = 1.0f;
+            wireframeDepthStencil.stencilTestEnable = VK_FALSE;
+            wireframeDepthStencil.front = {};
+            wireframeDepthStencil.back = {};
 
             VkGraphicsPipelineCreateInfo pipelineInfo{};
             pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -1212,7 +1386,7 @@ private:
             pipelineInfo.pViewportState = &viewportState;
             pipelineInfo.pRasterizationState = &rasterizer;
             pipelineInfo.pMultisampleState = &multisampling;
-            pipelineInfo.pDepthStencilState = &depthStencil;
+            pipelineInfo.pDepthStencilState = &wireframeDepthStencil;
             pipelineInfo.pColorBlendState = &colorBlending;
             pipelineInfo.pDynamicState = &dynamicState;
             pipelineInfo.layout = graphicsPipelineLayout;
@@ -1874,6 +2048,7 @@ private:
             // Initialize particles
             std::default_random_engine rndEngine((unsigned)time(nullptr));
             std::uniform_real_distribution<float> rndDist(0.0f, 1.0f);
+            std::uniform_real_distribution<float> rndLife(2.0f, 5.0f);
 
             // Initial particle positions on a circle
             particle_count = Nx * Ny * Nz / 8;
@@ -1885,9 +2060,9 @@ private:
                     2.0f + rndDist(rndEngine) * (Nx - 4.0f), 
                     2.0f + rndDist(rndEngine) * (Ny - 4.0f), 
                     2.0f + rndDist(rndEngine) * (Nz / 2 - 2.0f), 
-                    0 
+                    0.0f
                 };
-                particle.color = { 0.0f, 1.0f, 0.0f, 1.0f };
+                particle.color = { 0.0f, 1.0f, 0.0f, rndLife(rndEngine) };
             }
 
             VkDeviceSize bufferSize = sizeof(Particle) * particle_count;
@@ -1930,7 +2105,7 @@ private:
                     float dist = sqrt(dx * dx + dy * dy);
                     float maxDist = sqrt(cx * cx + cy * cy);
                     float t = std::min(dist / maxDist, 1.0f);
-                    vels[index + 2 * Nxyz] = 0.5f * (1.0f - t) + 0.05f * t;
+                    vels[index + 2 * Nxyz] = 0.05f * (1.0f - t) + 0.05f * t;
                 }
                 else if (z == Nz - 1) {
                     // vels[index + 2 * Nxyz] = 0.0f;
@@ -2000,7 +2175,7 @@ private:
 
             std::vector<uint> flags(Nxyz, 0);
             parallel_for(Nxyz, [&](uint32_t index) { uint x = index % Nx, y = (index - x) / Nx % Ny, z = index / Nx / Ny;
-                bool isObstacle = cube(x, y, z, glm::vec3(Nx / 2, Ny / 2, Nz / 2), 16.0f);
+                bool isObstacle = cube(x, y, z, glm::vec3(Nx / 2, Ny / 2, Nz / 2), 64.0f);
                 if (isObstacle) {
                     flags[index] = TYPE_S;
                 } else if (x == 0 || x == Nx - 1 || y == 0 || y == Ny - 1) {
@@ -2464,7 +2639,7 @@ private:
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
         {
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &graphicsDescriptorSets[currentFrame], 0, nullptr);
 
             VkViewport viewport{};
@@ -2475,16 +2650,18 @@ private:
             viewport.minDepth = 0.0f;
             viewport.maxDepth = 1.0f;
             vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-
+            
             VkRect2D scissor{};
             scissor.offset = { 0, 0 };
             scissor.extent = swapChainExtent;
             vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
             VkDeviceSize offsets[] = { 0 };
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, &shaderStorageBuffers[currentFrame], offsets);
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, &skyboxBuffers[currentFrame], offsets);
 
-            vkCmdDraw(commandBuffer, particle_count, 1, 0, 0);
+            vkCmdBindIndexBuffer(commandBuffer, skyboxIndexBuffers[currentFrame], 0, VK_INDEX_TYPE_UINT32);
+
+            vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(skyboxIndices.size()), 1, 0, 0, 0);
         }
 
         {
@@ -2514,7 +2691,8 @@ private:
         }
 
         {
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
+            VkPipeline currentPipeline = show_diagnostic_particles ? diagnosticPipeline : graphicsPipeline;
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &graphicsDescriptorSets[currentFrame], 0, nullptr);
 
             VkViewport viewport{};
@@ -2525,19 +2703,19 @@ private:
             viewport.minDepth = 0.0f;
             viewport.maxDepth = 1.0f;
             vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-            
+
             VkRect2D scissor{};
             scissor.offset = { 0, 0 };
             scissor.extent = swapChainExtent;
             vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
             VkDeviceSize offsets[] = { 0 };
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, &skyboxBuffers[currentFrame], offsets);
+            vkCmdBindVertexBuffers(commandBuffer, 0, 1, &shaderStorageBuffers[currentFrame], offsets);
 
-            vkCmdBindIndexBuffer(commandBuffer, skyboxIndexBuffers[currentFrame], 0, VK_INDEX_TYPE_UINT32);
-
-            vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(skyboxIndices.size()), 1, 0, 0, 0);
+            vkCmdDraw(commandBuffer, particle_count, 1, 0, 0);
         }
+
+        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -2639,6 +2817,7 @@ private:
             ubo.Nx = Nx;
             ubo.Ny = Ny;
             ubo.Nz = Nz;
+            ubo.render_mode = show_diagnostic_particles ? 1 : 0;
             ubo.model = glm::mat4(1.0f);
             ubo.view = glm::lookAt(cameraPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
             //ubo.view = glm::lookAt(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
@@ -2662,7 +2841,9 @@ private:
             ubo.fx = 0.0f;
             ubo.fy = 0.0f;
             ubo.fz = 0.0f;
+            ubo.dt = lastFrameTime / 1000.0f;
             ubo.t = currentTime;
+            ubo.render_mode = show_diagnostic_particles ? 1 : 0;
             memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
 
             currentTime += 1;

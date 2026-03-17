@@ -108,8 +108,8 @@ ivec3 e[Q] = {
 };
 
 struct Particle {
-	vec4 position;
-    vec4 color;
+	vec4 position;  // xyz: position, w: age (current lifetime in seconds)
+    vec4 color;     // rgb: color, a: life (total lifetime in seconds)
 };
 
 layout (std430, binding = 0) uniform SimulateUBO {
@@ -125,7 +125,9 @@ layout (std430, binding = 0) uniform SimulateUBO {
     float fx;
     float fy;
     float fz;
+    float dt;
     uint t;
+    uint render_mode;
 } ubo;
 
 layout(std430, binding = 1) buffer Particles {
@@ -399,6 +401,8 @@ void main()
     Particle particle = particles[index];
     
     vec3 p0 = particle.position.xyz;
+    float age = particle.position.w;
+    float life = particle.color.a * 10;
 
     if(ubo.particleRho != 1.0f) { // FORCE_FILED
 		const float drho = ubo.particleRho-1.0f;
@@ -410,6 +414,15 @@ void main()
     vec3 un = interpolate_u(p1);
     un = (un + length(un) * particle_boundary_force(p1));
     vec3 p = p0 + un;
+    
+    if (ubo.render_mode == 1) {
+        float jitter = 0.005;
+        p.x += (random2(floatBitsToUint(p.x), floatBitsToUint(p.y)) - 0.5f) * jitter;
+        p.y += (random2(floatBitsToUint(p.y), floatBitsToUint(p.z)) - 0.5f) * jitter;
+        p.z += (random2(floatBitsToUint(p.z), floatBitsToUint(p.x)) - 0.5f) * jitter;
+    }
+
+    age += ubo.dt;
     
     bool needRespawn = false;
     
@@ -425,19 +438,24 @@ void main()
         needRespawn = true;
     }
     
+    if (age >= life) {
+        needRespawn = true;
+    }
+    
     if (needRespawn) {
         uint seed = hash3(index, ubo.t, 0x12345678u);
         float rand_x = random(seed);
         float rand_y = random(hash(seed + 1u));
         float rand_z = random(hash(seed + 2u));
+        float rand_life = 2.0f + random(hash(seed + 3u)) * 3.0f;
         
         p.x = 2.0f + rand_x * (ubo.Nx - 4.0f);
         p.y = 2.0f + rand_y * (ubo.Ny - 4.0f);
-        p.z = 2.0f + rand_z * 1.0f;
+        p.z = 1.0f + rand_z * 2.0f;
         
         particles[index].position = vec4(p, 0.0f);
-        particles[index].color = vec4(0.8f, 0.8f, 0.2f, 1.0f);
+        particles[index].color = vec4(0.8f, 0.8f, 0.2f, rand_life);
     } else {
-        particles[index].position = vec4(p, 0.0f);
+        particles[index].position = vec4(p, age);
     }
 }

@@ -90,7 +90,9 @@ layout (std430, binding = 0) uniform SimulateUBO {
     float fx;
     float fy;
     float fz;
+    float dt;
     uint t;
+    uint render_mode;
 } ubo;
 
 layout(std430, binding = 1) buffer Particles {
