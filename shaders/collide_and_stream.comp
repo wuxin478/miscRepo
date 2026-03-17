@@ -173,20 +173,20 @@ void load_f(uint n, inout float fhn[Q], uint nbs[Q], uint t) {
 	}
 }
 
+void apply_moving_boundaries(inout float fhn[Q], const uint nbs[Q]) {
+    uint ji;
+	for(uint q = 1u; q < Q; q += 2u) {
+		float w6 = -6.0f*w[q];
+		ji = nbs[q+1u]; fhn[q   ] = (flags[ji]&TYPE_BO)==TYPE_S ? fma(w6, c(q+1u)*vels[ji]+c(Q+q+1u)*vels[ubo.Nxyz+ji]+c(2u*Q+q+1u)*vels[2u*ubo.Nxyz+ji], fhn[q   ]) : fhn[q   ];
+		ji = nbs[q   ]; fhn[q+1u] = (flags[ji]&TYPE_BO)==TYPE_S ? fma(w6, c(q   )*vels[ji]+c(Q+q   )*vels[ubo.Nxyz+ji]+c(2u*Q+q   )*vels[2u*ubo.Nxyz+ji], fhn[q+1u]) : fhn[q+1u];
+	}
+}
+
 void store_f(uint n, inout float fhn[Q], uint nbs[Q], uint t) {
     store(ddfs, index_f(n, 0u), fhn[0]); // Esoteric-Pull
 	for(uint q = 1u; q < Q; q += 2u) {
 		store(ddfs, index_f(n     , t%2u!=0 ? q    : q+1u), fhn[q+1u]);
 		store(ddfs, index_f(nbs[q], t%2u!=0 ? q+1u : q   ), fhn[q   ]);
-	}
-}
-
-void apply_moving_boundaries(inout float fhn[Q], const uint nbs[Q]) {
-    uint ji; // reads velocities of only neighboring boundary cells, which do not change during simulation
-	for(uint q = 1u; q < Q; q += 2u) { // loop is entirely unrolled by compiler, no unnecessary memory access is happening
-		float w6 = -6.0f*w[q]; // w6 = -2*w_i*rho_wall/c^2, w(i) = w(i+1) if i is odd, rho_wall is assumed as rho_avg=1 (necessary choice to assure mass conservation)
-		ji = nbs[q+1u]; fhn[q   ] = (flags[ji]&TYPE_BO)==TYPE_S ? fma(w6, c(q+1u)*vels[ji]+c(Q+q+1u)*vels[ubo.Nxyz+ji]+c(2u*Q+q+1u)*vels[2u*ubo.Nxyz+ji], fhn[q   ]) : fhn[q   ]; // boundary : regular
-		ji = nbs[q   ]; fhn[q+1u] = (flags[ji]&TYPE_BO)==TYPE_S ? fma(w6, c(q   )*vels[ji]+c(Q+q   )*vels[ubo.Nxyz+ji]+c(2u*Q+q   )*vels[2u*ubo.Nxyz+ji], fhn[q+1u]) : fhn[q+1u];
 	}
 }
 
@@ -231,6 +231,38 @@ void calculate_f_eq(const float rho, float ux, float uy, float uz, inout float f
 	feq[17] = fma(rhoe, fma(0.5f, fma(u5, u5, c3), u5), rhom1e); feq[18] = fma(rhoe, fma(0.5f, fma(u5, u5, c3), -u5), rhom1e); // 0+- 0-+
 }
 
+void apply_inflow_boundary(inout float fhn[Q], uint index) {
+    // If current cell is TYPE_E (inflow boundary), enforce equilibrium with prescribed velocity
+    if ((flags[index] & TYPE_BO) == TYPE_E) {
+        float u_in = vels[2u*ubo.Nxyz + index];
+        if (u_in > 0.0f) {
+            float feq[Q];
+            calculate_f_eq(1.0f, 0.0f, 0.0f, u_in, feq);
+            for (uint q = 0u; q < Q; q++) {
+                fhn[q] = feq[q];
+            }
+        }
+    }
+}
+
+void apply_outflow_boundary(inout float fhn[Q], const uint nbs[Q]) {
+    // For fluid cells next to outflow boundary, use zero-gradient extrapolation
+    for(uint q = 1u; q < Q; q += 2u) {
+        if ((flags[nbs[q+1u]] & TYPE_BO) == TYPE_E) {
+            float u_nb = vels[2u*ubo.Nxyz + nbs[q+1u]];
+            if (u_nb <= 0.0f) {
+                fhn[q] = fhn[q+1u];
+            }
+        }
+        if ((flags[nbs[q]] & TYPE_BO) == TYPE_E) {
+            float u_nb = vels[2u*ubo.Nxyz + nbs[q]];
+            if (u_nb <= 0.0f) {
+                fhn[q+1u] = fhn[q];
+            }
+        }
+    }
+}
+
 void main() 
 {
     uvec3 globalSize = gl_NumWorkGroups * gl_WorkGroupSize;
@@ -250,6 +282,9 @@ void main()
     if (flagsn == TYPE_MS) { // MOVING_BOUNDARIES
         apply_moving_boundaries(fhn, nbs); // apply Dirichlet velocity boundaries if necessary (reads velocities of only neighboring boundary cells, which do not change during simulation)
     }
+    
+    apply_inflow_boundary(fhn, index); // apply inflow boundary conditions for TYPE_E boundaries
+    apply_outflow_boundary(fhn, nbs); // apply outflow boundary conditions (zero-gradient extrapolation)
     
     float rhon, uxn, uyn, uzn; // calculate local density and velocity for collision
     calculate_rho_u(fhn, rhon, uxn, uyn, uzn); // calculate density and velocity fields from fi

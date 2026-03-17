@@ -1876,19 +1876,18 @@ private:
             std::uniform_real_distribution<float> rndDist(0.0f, 1.0f);
 
             // Initial particle positions on a circle
-            uint32_t nx = Nx / 2, ny = Ny / 4, nz = Nz / 4;
-            uint32_t sx = Nx / 2 - nx / 2, sy = Ny / 4 - ny / 2, sz = Nz / 4 - nz / 2;
-            particle_count = nx * ny * nz;
+            particle_count = Nx * Ny * Nz / 8;
             std::vector<Particle> particles(particle_count);
 
-            for (uint32_t i = 0; i < nx; ++i) {
-                for (uint32_t j = 0; j < ny; ++j) {
-                    for (uint32_t k = 0; k < nz; ++k) {
-                        Particle& particle = particles[(k * ny + j) * nx + i];
-                        particle.position = { i + sx + rndDist(rndEngine), j + sy + rndDist(rndEngine), k + sz + rndDist(rndEngine), 0 };
-                        particle.color = { 0.0f, 1.0f, 0.0f, 1.0f };
-                    }
-                }
+            for (uint32_t idx = 0; idx < particle_count; ++idx) {
+                Particle& particle = particles[idx];
+                particle.position = { 
+                    2.0f + rndDist(rndEngine) * (Nx - 4.0f), 
+                    2.0f + rndDist(rndEngine) * (Ny - 4.0f), 
+                    2.0f + rndDist(rndEngine) * (Nz / 2 - 2.0f), 
+                    0 
+                };
+                particle.color = { 0.0f, 1.0f, 0.0f, 1.0f };
             }
 
             VkDeviceSize bufferSize = sizeof(Particle) * particle_count;
@@ -1925,7 +1924,14 @@ private:
 
             std::vector<float> vels(Nxyz * 3, 0.0f);
             parallel_for(Nxyz, [&](uint32_t index) { uint x = index % Nx, y = (index - x) / Nx % Ny, z = index / Nx / Ny;
-                if (z == Nz - 1) vels[index + Nxyz] = 0.5f;
+                if (z == 0) {
+                    float cx = Nx / 2.0f, cy = Ny / 2.0f;
+                    float dx = x - cx, dy = y - cy;
+                    float dist = sqrt(dx * dx + dy * dy);
+                    float maxDist = sqrt(cx * cx + cy * cy);
+                    float t = std::min(dist / maxDist, 1.0f);
+                    vels[index + 2 * Nxyz] = 0.5f * (1.0f - t) + 0.05f * t;
+                }
             });
 
             // create staging buffer
@@ -1991,10 +1997,16 @@ private:
 
             std::vector<uint> flags(Nxyz, 0);
             parallel_for(Nxyz, [&](uint32_t index) { uint x = index % Nx, y = (index - x) / Nx % Ny, z = index / Nx / Ny;
-                if (x == 0 || x == Nx - 1 || y == 0 || y == Ny - 1 || z == 0 || z == Nz - 1) {
+                bool isObstacle = cube(x, y, z, glm::vec3(Nx / 2, Ny / 2, Nz / 2), 16.0f);
+                if (isObstacle) {
                     flags[index] = TYPE_S;
+                } else if (x == 0 || x == Nx - 1 || y == 0 || y == Ny - 1) {
+                    flags[index] = TYPE_S;
+                } else if (z == 0) {
+                    flags[index] = TYPE_E;
+                } else if (z == Nz - 1) {
+                    flags[index] = TYPE_E;
                 }
-                if (cube(x, y, z, glm::vec3(Nx / 2, Ny / 2, Nz / 2), 16.0f)) flags[index] = TYPE_S;
             });
 
             // create staging buffer
@@ -2641,12 +2653,12 @@ private:
             ubo.Nxyz = Nxyz;
             ubo.particleCount = particle_count;
             ubo.particleRho = 1.0f;
-            ubo.niu = 0.000001f;
+            ubo.niu = 0.01f;
             ubo.tau = 3.0f * ubo.niu + 0.5f;
             ubo.inv_tau = 1.0f / ubo.tau;
             ubo.fx = 0.0f;
             ubo.fy = 0.0f;
-            ubo.fz = -0.000001f;
+            ubo.fz = 0.0f;
             ubo.t = currentTime;
             memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
 

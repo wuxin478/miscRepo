@@ -167,9 +167,20 @@ void neighbors(uint index, inout uint nbs[Q]) {
 void load_f(uint n, inout float fhn[Q], uint nbs[Q], uint t) {
     fhn[0] = load(ddfs, index_f(n, 0u)); // Esoteric-Pull
 	for(uint q = 1u; q < Q; q += 2u) {
-		fhn[q   ] = load(ddfs, index_f(n     , t%2u!=0 ? q    : q+1u));
-		fhn[q+1u] = load(ddfs, index_f(nbs[q], t%2u!=0 ? q+1u : q   ));
-	}
+        float f_q, f_q1;
+        if (t%2u != 0u) {
+            f_q = load(ddfs, index_f(n, q));
+            f_q1 = load(ddfs, index_f(nbs[q], q+1u));
+        } else {
+            f_q = load(ddfs, index_f(n, q));
+            f_q1 = load(ddfs, index_f(n, q));
+            if ((flags[nbs[q]] & TYPE_BO) == TYPE_E) {
+                f_q1 = f_q;
+            }
+        }
+        fhn[q] = f_q;
+        fhn[q+1u] = f_q1;
+    }
 }
 
 void store_f(uint n, inout float fhn[Q], uint nbs[Q], uint t) {

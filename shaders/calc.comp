@@ -28,6 +28,38 @@
 #define TYPE_GI 0x38 // 0b00111000 // change from gas to interface
 #define TYPE_SU 0x38 // 0b00111000 // any flag bit used for SURFACE
 
+// Better hash function for GPU
+uint hash(uint x) {
+    x ^= x >> 17u;
+    x *= 0xed5ad4bbu;
+    x ^= x >> 11u;
+    x *= 0xac4c1b51u;
+    x ^= x >> 15u;
+    x *= 0x31848babu;
+    x ^= x >> 14u;
+    return x;
+}
+
+uint hash2(uint x, uint y) {
+    return hash(x + hash(y));
+}
+
+uint hash3(uint x, uint y, uint z) {
+    return hash(x + hash(y + hash(z)));
+}
+
+float random(uint seed) {
+    return float(hash(seed)) / 4294967295.0f;
+}
+
+float random2(uint seed1, uint seed2) {
+    return float(hash2(seed1, seed2)) / 4294967295.0f;
+}
+
+float random3(uint seed1, uint seed2, uint seed3) {
+    return float(hash3(seed1, seed2, seed3)) / 4294967295.0f;
+}
+
 #define fma(a, b, c) ((a)*(b)+(c))
 #define load(p,o) p[o]
 #define store(p,o,x) p[o]=x
@@ -295,8 +327,13 @@ vec3 particle_boundary_force(vec3 pos) {
 
     vec3 force = vec3(0.0f);
     float distance = 2.0f;
-    for (uint q = 1; q < Q; ++q){
+    for (uint q = 1; q < Q; ++q) {
         ivec3 nb = e[q] + lattice;
+        if (nb.x < 0 || nb.x >= ubo.Nx - 1 ||
+            nb.y < 0 || nb.y >= ubo.Ny - 1 ||
+            nb.z < 0 || nb.z >= ubo.Nz - 1) {
+            return vec3(0.0f);
+        }
         if (nb.x <= 0 || nb.x >= ubo.Nx - 1) {
             force.x = lattice.x - nb.x;
         }
@@ -361,17 +398,46 @@ void main()
 
     Particle particle = particles[index];
     
-    vec3 p0 = particle.position.xyz;// cache particle position
+    vec3 p0 = particle.position.xyz;
 
     if(ubo.particleRho != 1.0f) { // FORCE_FILED
-		const float drho = ubo.particleRho-1.0f; // density difference leads to particle buoyancy
-		vec3 Fn = vec3(ubo.fx*drho, ubo.fy*drho, ubo.fz*drho); // F = F_p+F_f = (m_p-m_f)*g = (rho_p-rho_f)*g*V
-		spread_force(p0, Fn); // do force spreading
+		const float drho = ubo.particleRho-1.0f;
+		vec3 Fn = vec3(ubo.fx*drho, ubo.fy*drho, ubo.fz*drho);
+		spread_force(p0, Fn);
 	}
 
     const vec3 p1 = p0;
-    vec3 un = interpolate_u(p1); // trilinear interpolation of velocity at point p
+    vec3 un = interpolate_u(p1);
     un = (un + length(un) * particle_boundary_force(p1));
-    const vec3 p = p0 + un; // advect particles
-    particles[index].position = vec4(p, 0.0f);
+    vec3 p = p0 + un;
+    
+    bool needRespawn = false;
+    
+    if (p.z >= ubo.Nz - 2.0f) {
+        needRespawn = true;
+    }
+    
+    if (p.z <= 1.0f) {
+        needRespawn = true;
+    }
+    
+    if (p.x <= 1.0f || p.x >= ubo.Nx - 2.0f || p.y <= 1.0f || p.y >= ubo.Ny - 2.0f) {
+        needRespawn = true;
+    }
+    
+    if (needRespawn) {
+        uint seed = hash3(index, ubo.t, 0x12345678u);
+        float rand_x = random(seed);
+        float rand_y = random(hash(seed + 1u));
+        float rand_z = random(hash(seed + 2u));
+        
+        p.x = 2.0f + rand_x * (ubo.Nx - 4.0f);
+        p.y = 2.0f + rand_y * (ubo.Ny - 4.0f);
+        p.z = 2.0f + rand_z * 1.0f;
+        
+        particles[index].position = vec4(p, 0.0f);
+        particles[index].color = vec4(0.8f, 0.8f, 0.2f, 1.0f);
+    } else {
+        particles[index].position = vec4(p, 0.0f);
+    }
 }
