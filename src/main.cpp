@@ -125,6 +125,7 @@ struct SimulateUBO {
     alignas(4) float dt = 0.0f;
     alignas(4) uint32_t t = 0;
     alignas(4) uint32_t render_mode = 0;
+    alignas(4) uint32_t fixed_point_iteration = 0;
 };
 
 struct RenderingUBO {
@@ -226,6 +227,7 @@ private:
     bool isInit = false;
     uint32_t currentTime = 0;
     int render_mode = 1;
+    bool enIBM = true;
 
     VkInstance instance;
     VkDebugUtilsMessengerEXT debugMessenger;
@@ -269,6 +271,9 @@ private:
     VkPipeline computePipeline;
     VkPipeline initPipeline;
     VkPipeline collideAndStreamPipeline;
+    VkPipeline ibmForce1Pipeline;
+    VkPipeline ibmForce2Pipeline;
+    VkPipeline calcUPipeline;
     VkPipeline updateMacroPipeline;
     VkPipeline applyBCPipeline;
 
@@ -604,6 +609,7 @@ private:
                 ImGui::Begin("Particle Settings");
                 const char* render_modes[] = { "Normal Particles", "Diagnostic Particles", "Velocity Field" };
                 ImGui::Combo("Render Mode", &render_mode, render_modes, IM_ARRAYSIZE(render_modes));
+                ImGui::Checkbox("Enable IBM?", &enIBM);
                 ImGui::Text("FPS: %.1f", 1000.0f / lastFrameTime);
                 ImGui::Text("Particles: %d", particle_count);
                 ImGui::End();
@@ -652,6 +658,9 @@ private:
         vkDestroyPipeline(device, computePipeline, nullptr);
         vkDestroyPipeline(device, initPipeline, nullptr);
         vkDestroyPipeline(device, collideAndStreamPipeline, nullptr);
+        vkDestroyPipeline(device, ibmForce1Pipeline, nullptr);
+        vkDestroyPipeline(device, ibmForce2Pipeline, nullptr);
+        vkDestroyPipeline(device, calcUPipeline, nullptr);
         vkDestroyPipeline(device, updateMacroPipeline, nullptr);
         vkDestroyPipeline(device, applyBCPipeline, nullptr);
 
@@ -1876,6 +1885,75 @@ private:
         }
 
         {
+            auto computeShaderCode = readFile("shaders/ibm_force1_comp.spv");
+
+            VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
+
+            VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
+            computeShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            computeShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            computeShaderStageInfo.module = computeShaderModule;
+            computeShaderStageInfo.pName = "main";
+
+            VkComputePipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+            pipelineInfo.layout = computePipelineLayout;
+            pipelineInfo.stage = computeShaderStageInfo;
+
+            if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &ibmForce1Pipeline) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create compute pipeline!");
+            }
+
+            vkDestroyShaderModule(device, computeShaderModule, nullptr);
+        }
+
+        {
+            auto computeShaderCode = readFile("shaders/ibm_force2_comp.spv");
+
+            VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
+
+            VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
+            computeShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            computeShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            computeShaderStageInfo.module = computeShaderModule;
+            computeShaderStageInfo.pName = "main";
+
+            VkComputePipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+            pipelineInfo.layout = computePipelineLayout;
+            pipelineInfo.stage = computeShaderStageInfo;
+
+            if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &ibmForce2Pipeline) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create compute pipeline!");
+            }
+
+            vkDestroyShaderModule(device, computeShaderModule, nullptr);
+        }
+
+        {
+            auto computeShaderCode = readFile("shaders/calc_u_comp.spv");
+
+            VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
+
+            VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
+            computeShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            computeShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            computeShaderStageInfo.module = computeShaderModule;
+            computeShaderStageInfo.pName = "main";
+
+            VkComputePipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+            pipelineInfo.layout = computePipelineLayout;
+            pipelineInfo.stage = computeShaderStageInfo;
+
+            if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &calcUPipeline) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create compute pipeline!");
+            }
+
+            vkDestroyShaderModule(device, computeShaderModule, nullptr);
+        }
+
+        {
             auto computeShaderCode = readFile("shaders/update_macro_comp.spv");
 
             VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
@@ -3075,7 +3153,8 @@ private:
                 scissor.extent = swapChainExtent;
                 vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-                vkCmdDraw(commandBuffer, (Nx / 8) * (Ny / 8) * (Nz / 8) * 2, 1, 0, 0);
+                constexpr uint STRIDE = 6u;
+                vkCmdDraw(commandBuffer, (Nx / STRIDE) * (Ny / STRIDE) * (Nz / STRIDE) * 2, 1, 0, 0);
             } else {
                 VkPipeline currentPipeline = (render_mode == 1) ? diagnosticPipeline : graphicsPipeline;
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
@@ -3133,7 +3212,7 @@ private:
         }
     }
 
-    void recordComputeCommandBuffer(VkCommandBuffer commandBuffer) {
+    void recordComputeCommandBuffer(VkCommandBuffer commandBuffer, uint currentFrame) {
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
@@ -3156,29 +3235,69 @@ private:
             isInit = true;
         }
 
+        vkCmdFillBuffer(commandBuffer, borderForceBuffers[currentFrame], 0, Nxyz * sizeof(float) * 3, 0);
+        VkMemoryBarrier fillmemorybarrier{};
+        fillmemorybarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        fillmemorybarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        fillmemorybarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &fillmemorybarrier, 0, nullptr, 0, nullptr);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, calcUPipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
+        vkCmdDispatch(commandBuffer, Nxyz / 256 + 1, 1, 1);
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
+
+        if (enIBM) {
+            for (int i = 0; i < 5; ++i) {
+                // 准备要写入的数据（i 的副本）
+                int iteration = i;
+
+                // 更新 Uniform Buffer 中的 fixed_point_iteration 字段
+                vkCmdUpdateBuffer(
+                    commandBuffer,
+                    uniformBuffers[currentFrame],                // 目标缓冲区
+                    offsetof(SimulateUBO, fixed_point_iteration), // 偏移量
+                    sizeof(int),                                 // 数据大小
+                    &iteration);                                 // 主机端数据指针（录制时拷贝）
+
+                // 插入屏障：确保传输写入对计算着色器可见
+                VkMemoryBarrier uboUpdateBarrier{};
+                uboUpdateBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                uboUpdateBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                uboUpdateBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT; // 计算着色器需要读 UBO
+
+                vkCmdPipelineBarrier(
+                    commandBuffer,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,              // 源阶段：更新缓冲区
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,        // 目标阶段：计算着色器
+                    0,
+                    1, &uboUpdateBarrier,
+                    0, nullptr,
+                    0, nullptr);
+                
+                // 1. Fluid -> Boundary (计算恢复力)
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ibmForce1Pipeline);
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
+                vkCmdDispatch(commandBuffer, lagrangianPointCount / 256 + 1, 1, 1);
+                vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
+                
+                // 2. Boundary -> Fluid (扩散力/更新速度)
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ibmForce2Pipeline);
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
+                vkCmdDispatch(commandBuffer, lagrangianPointCount / 256 + 1, 1, 1);
+                vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
+            }
+        }
+
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, collideAndStreamPipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
         vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
-        //vkCmdDispatch(commandBuffer, sqrt(PARTICLE_COUNT) / 16, sqrt(PARTICLE_COUNT) / 16, 1);
         vkCmdDispatch(commandBuffer, Nxyz / 256 + 1, 1, 1);
-
-        //vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, updateMacroPipeline);
-        ////vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
-        //vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
-        ////vkCmdDispatch(commandBuffer, sqrt(PARTICLE_COUNT) / 16, sqrt(PARTICLE_COUNT) / 16, 1);
-        //vkCmdDispatch(commandBuffer, Nxyz / 256 + 1, 1, 1);
-        //
-        //vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, applyBCPipeline);
-        ////vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
-        //vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
-        ////vkCmdDispatch(commandBuffer, sqrt(PARTICLE_COUNT) / 16, sqrt(PARTICLE_COUNT) / 16, 1);
-        //vkCmdDispatch(commandBuffer, Nxyz / 256 + 1, 1, 1);
 
         for (uint32_t iter = 0; iter < 1; iter++) {
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
-            //vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
             vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
-            //vkCmdDispatch(commandBuffer, sqrt(PARTICLE_COUNT) / 16, sqrt(PARTICLE_COUNT) / 16, 1);
             vkCmdDispatch(commandBuffer, particle_count / 256 + 1, 1, 1);
         }
 
@@ -3216,7 +3335,7 @@ private:
         }
     }
 
-    void updateUniformBuffer(uint32_t currentImage) {
+    void updateUniformBuffer(uint32_t currentFrame) {
         {
             glm::vec3 cameraPos = glm::vec3(1.0f);
             cameraPos.x = distance * sin(glm::radians(ry)) * cos(glm::radians(rx));
@@ -3233,7 +3352,7 @@ private:
             ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 10.0f);
             //ubo.proj = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 100.0f);
             ubo.proj[1][1] *= -1;
-            memcpy(renderingUBOBuffersMapped[currentImage], &ubo, sizeof(ubo));
+            memcpy(renderingUBOBuffersMapped[currentFrame], &ubo, sizeof(ubo));
         }
 
         {
@@ -3253,7 +3372,7 @@ private:
             ubo.dt = lastFrameTime / 1000.0f;
             ubo.t = currentTime;
             ubo.render_mode = render_mode;
-            memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
+            memcpy(uniformBuffersMapped[currentFrame], &ubo, sizeof(ubo));
 
             currentTime += 1;
         }
@@ -3271,7 +3390,7 @@ private:
         vkResetFences(device, 1, &computeInFlightFences[currentFrame]);
 
         vkResetCommandBuffer(computeCommandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
-        recordComputeCommandBuffer(computeCommandBuffers[currentFrame]);
+        recordComputeCommandBuffer(computeCommandBuffers[currentFrame], currentFrame);
 
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &computeCommandBuffers[currentFrame];

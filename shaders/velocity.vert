@@ -21,7 +21,7 @@ layout(std430, binding = 4) readonly buffer Flags {
 
 layout(location = 0) out vec3 vColor;
 
-const uint STRIDE = 8u;
+const uint STRIDE = 6u;
 
 vec3 loadVelocity(uint n) {
     uint Nxyz = ubo.Nx * ubo.Ny * ubo.Nz;
@@ -74,7 +74,7 @@ void main() {
     vec3 pos = vec3(float(x), float(y), float(z));
     
     if (endpoint == 1 && speed > 0.0001) {
-        pos = pos + normalize(vel) * 5.0;
+        pos = pos + normalize(vel) * speed * 250.0f;
     }
     
     vec3 normalizedPos = vec3(

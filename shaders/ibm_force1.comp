@@ -1,8 +1,10 @@
 #version 450
+#extension GL_EXT_shader_atomic_float : require // 对于某些硬件，可能需要用 int 实现原子加
 #extension GL_EXT_scalar_block_layout : require
 
 #define D 3
 #define Q 19
+#define SCALE 1e10
 #define def_c 0.57735027f
 
 #define def_w0 (1.0f/3.0f ) // center (0)
@@ -148,7 +150,7 @@ int c(const uint i) {
 }
 
 float sq(float x) {
-    return pow(x, 2);
+    return x * x;
 }
 
 uvec3 coordinates(const uint n) { // disassemble 1D index to 3D coordinates (n -> x,y,z)
@@ -187,20 +189,18 @@ void neighbors(uint index, inout uint nbs[Q]) {
 void load_f(uint n, inout float fhn[Q], uint nbs[Q], uint t) {
     fhn[0] = load(ddfs, index_f(n, 0u)); // Esoteric-Pull
 	for(uint q = 1u; q < Q; q += 2u) {
-        float f_q, f_q1;
-        if (t%2u != 0u) {
-            f_q = load(ddfs, index_f(n, q));
-            f_q1 = load(ddfs, index_f(nbs[q], q+1u));
-        } else {
-            f_q = load(ddfs, index_f(n, q));
-            f_q1 = load(ddfs, index_f(n, q));
-            if ((flags[nbs[q]] & TYPE_BO) == TYPE_E) {
-                f_q1 = f_q;
-            }
-        }
-        fhn[q] = f_q;
-        fhn[q+1u] = f_q1;
-    }
+		fhn[q   ] = load(ddfs, index_f(n     , t%2u!=0 ? q    : q+1u));
+		fhn[q+1u] = load(ddfs, index_f(nbs[q], t%2u!=0 ? q+1u : q   ));
+	}
+}
+
+void apply_moving_boundaries(inout float fhn[Q], const uint nbs[Q]) {
+    uint ji;
+	for(uint q = 1u; q < Q; q += 2u) {
+		float w6 = -6.0f*w[q];
+		ji = nbs[q+1u]; fhn[q   ] = (flags[ji]&TYPE_BO)==TYPE_S ? fma(w6, c(q+1u)*vels[ji]+c(Q+q+1u)*vels[ubo.Nxyz+ji]+c(2u*Q+q+1u)*vels[2u*ubo.Nxyz+ji], fhn[q   ]) : fhn[q   ];
+		ji = nbs[q   ]; fhn[q+1u] = (flags[ji]&TYPE_BO)==TYPE_S ? fma(w6, c(q   )*vels[ji]+c(Q+q   )*vels[ubo.Nxyz+ji]+c(2u*Q+q   )*vels[2u*ubo.Nxyz+ji], fhn[q+1u]) : fhn[q+1u];
+	}
 }
 
 void store_f(uint n, inout float fhn[Q], uint nbs[Q], uint t) {
@@ -211,16 +211,7 @@ void store_f(uint n, inout float fhn[Q], uint nbs[Q], uint t) {
 	}
 }
 
-void apply_moving_boundaries(inout float fhn[Q], const uint nbs[Q]) {
-    uint ji; // reads velocities of only neighboring boundary cells, which do not change during simulation
-	for(uint q = 1u; q < Q; q += 2u) { // loop is entirely unrolled by compiler, no unnecessary memory access is happening
-		float w6 = -6.0f*w[q]; // w6 = -2*w_i*rho_wall/c^2, w(i) = w(i+1) if i is odd, rho_wall is assumed as rho_avg=1 (necessary choice to assure mass conservation)
-		ji = nbs[q+1u]; fhn[q   ] = (flags[ji]&TYPE_BO)==TYPE_S ? fma(w6, c(q+1u)*vels[ji]+c(Q+q+1u)*vels[ubo.Nxyz+ji]+c(2u*Q+q+1u)*vels[2u*ubo.Nxyz+ji], fhn[q   ]) : fhn[q   ]; // boundary : regular
-		ji = nbs[q   ]; fhn[q+1u] = (flags[ji]&TYPE_BO)==TYPE_S ? fma(w6, c(q   )*vels[ji]+c(Q+q   )*vels[ubo.Nxyz+ji]+c(2u*Q+q   )*vels[2u*ubo.Nxyz+ji], fhn[q+1u]) : fhn[q+1u];
-	}
-}
-
-void calculate_rho_u(float f[Q], inout float rhon, inout float uxn, inout float uyn, inout float uzn) {
+void calculate_rho_u(const float f[Q], inout float rhon, inout float uxn, inout float uyn, inout float uzn) {
     float rho=f[0], ux, uy, uz;
     for(uint q=1u; q<Q; q++) rho += f[q]; // calculate density from fi
 	rho += 1.0f; // add 1.0f last to avoid digit extinction effects when summing up fi (perturbation method / DDF-shifting)
@@ -233,15 +224,15 @@ void calculate_rho_u(float f[Q], inout float rhon, inout float uxn, inout float 
     uzn = uz/rho;
 }
 
-void calculate_forcing_terms(float ux, float uy, float uz, float fx, float fy, float fz, inout float Fin[Q]) {
+void calculate_forcing_terms(const float ux, const float uy, const float uz, const float fx, const float fy, const float fz, inout float Fin[Q]) {
     const float uF = -0.33333334f*fma(ux, fx, fma(uy, fy, uz*fz)); // 3D
-    Fin[0] = 9.0f*w[0]*uF ; // 000 (identical for all velocity sets)
+    Fin[0] = 9.0f*def_w0*uF ; // 000 (identical for all velocity sets)
 	for(uint q=1u; q<Q; q++) { // loop is entirely unrolled by compiler, no unnecessary FLOPs are happening
 		Fin[q] = 9.0f*w[q]*fma(c(q)*fx+c(Q+q)*fy+c(2u*Q+q)*fz, c(q)*ux+c(Q+q)*uy+c(2u*Q+q)*uz+0.33333334f, uF);
 	}
 }
 
-void calculate_f_eq(float rho, float ux, float uy, float uz, inout float feq[Q]) {
+void calculate_f_eq(const float rho, float ux, float uy, float uz, inout float feq[Q]) {
     const float rhom1 = rho-1.0f; // rhom1 is arithmetic optimization to minimize digit extinction
     const float c3 = -3.0f*(sq(ux)+sq(uy)+sq(uz)); // c3 = -2*sq(u)/(2*sq(c))
 	uz *= 3.0f; // only needed for 3D
@@ -261,39 +252,123 @@ void calculate_f_eq(float rho, float ux, float uy, float uz, inout float feq[Q])
 	feq[17] = fma(rhoe, fma(0.5f, fma(u5, u5, c3), u5), rhom1e); feq[18] = fma(rhoe, fma(0.5f, fma(u5, u5, c3), -u5), rhom1e); // 0+- 0-+
 }
 
+void apply_inflow_boundary(inout float fhn[Q], uint index) {
+    // If current cell is TYPE_E (inflow boundary), enforce equilibrium with prescribed velocity
+    if ((flags[index] & TYPE_BO) == TYPE_E) {
+        float u_in = vels[2u*ubo.Nxyz + index];
+        if (u_in > 0.0f) {
+            float feq[Q];
+            calculate_f_eq(1.0f, 0.0f, 0.0f, u_in, feq);
+            for (uint q = 0u; q < Q; q++) {
+                fhn[q] = feq[q];
+            }
+        }
+    }
+}
+
+void apply_outflow_boundary(inout float fhn[Q], const uint nbs[Q]) {
+    // For fluid cells next to outflow boundary, use zero-gradient extrapolation
+    for(uint q = 1u; q < Q; q += 2u) {
+        if ((flags[nbs[q+1u]] & TYPE_BO) == TYPE_E) {
+            float u_nb = vels[2u*ubo.Nxyz + nbs[q+1u]];
+            if (u_nb <= 0.0f) {
+                fhn[q] = fhn[q+1u];
+            }
+        }
+        if ((flags[nbs[q]] & TYPE_BO) == TYPE_E) {
+            float u_nb = vels[2u*ubo.Nxyz + nbs[q]];
+            if (u_nb <= 0.0f) {
+                fhn[q+1u] = fhn[q];
+            }
+        }
+    }
+}
+
+// IBM 核心：Peskin 的 4 点离散 Delta 权重函数 (基于论文定义)
+float peskin_w(float r) {
+    float abs_r = abs(r);
+    
+    if (abs_r <= 1.0) {
+        // 1/8 * (3 - 2|r| + sqrt(1 + 4|r| - 4r^2))
+        // 加上 max(0, ...) 是为了防止浮点误差导致 sqrt 内部出现极小负数
+        return 0.125 * (3.0 - 2.0 * abs_r + sqrt(max(0.0, 1.0 + 4.0 * abs_r - 4.0 * abs_r * abs_r)));
+    } 
+    else if (abs_r <= 2.0) {
+        // 1/8 * (5 - 2|r| - sqrt( -7 + 12|r| - 4r^2 ))
+        return 0.125 * (5.0 - 2.0 * abs_r - sqrt(max(0.0, -7.0 + 12.0 * abs_r - 4.0 * abs_r * abs_r)));
+    } 
+    return 0.0; // r > 2.0 时截断为 0
+}
+
+// 辅助函数：计算 3D 空间下的权重乘积 w(|x-X|) * w(|y-Y|) * w(|z-Z|)
+float compute_weight_3d(vec3 lagrangian_pos, vec3 eulerian_pos) {
+    vec3 r = lagrangian_pos - eulerian_pos;
+    return peskin_w(r.x) * peskin_w(r.y) * peskin_w(r.z);
+}
+
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
 void main()
 {
-    uvec3 globalSize = gl_NumWorkGroups * gl_WorkGroupSize;
-    uint index = gl_GlobalInvocationID.z * globalSize.x * globalSize.y + gl_GlobalInvocationID.y * globalSize.x + gl_GlobalInvocationID.x;
-    if (index >= ubo.Nxyz) return;
+    // 每个线程负责一个拉格朗日点
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= ubo.particleCount) return; // ubo.particleCount 是拉格朗日点总数
 
-    uint flagsn = flags[index];
-    uint flagsn_bo = flagsn & TYPE_BO; // extract boundary flags
+    // --- 1. 获取拉格朗日点的位置和目标速度 ---
+    vec3 point_pos = lagrangianPoints[k].position.xyz;
+    
+    // TODO: 设置该点的目标速度 uk。对于静止物体，它就是 (0,0,0)。
+    // 对于运动物体，你需要从 CPU 传入它的速度，或者像论文中那样通过 M(t) 矩阵计算。
+    // 我们先假设是静止的。
+    vec3 target_vel_k = vec3(0.0, 0.0, 0.0);
+    
+    // --- 2. 插值计算该点的流体速度 u_iter(k) ---
+    vec3 interpolated_vel = vec3(0.0);
+    
+    // 遍历周围 5x5x5 的流体晶格 (因为 peskin_w 在 r>2 时为0)
+    ivec3 center_cell = ivec3(round(point_pos));
+    for (int i = -2; i <= 2; ++i) {
+    for (int j = -2; j <= 2; ++j) {
+    for (int k_cell = -2; k_cell <= 2; ++k_cell) {
+        ivec3 cell_coord = center_cell + ivec3(i, j, k_cell);
 
-    uint nbs[Q]; // neighbor indices
-    neighbors(index, nbs); // calculate neighbor indices
+        // 边界检查 (确保不出界)
+        if (any(lessThan(cell_coord, ivec3(0))) || any(greaterThanEqual(cell_coord, ivec3(ubo.Nx, ubo.Ny, ubo.Nz)))) {
+            continue;
+        }
 
-    uint nbflags[Q]; // cache neighbor flags for multiple readings
-    for(uint q=1u; q<Q; q++) nbflags[q] = flags[nbs[q]];
+        uint fluid_index = cell_coord.z * ubo.Nx * ubo.Ny + cell_coord.y * ubo.Nx + cell_coord.x;
+        vec3 fluid_pos = vec3(cell_coord);
 
-    if(flagsn_bo==TYPE_S) { // cell is solid
-		bool TYPE_ONLY_S = true; // has only solid neighbors
-		for(uint q=1u; q<Q; q++) TYPE_ONLY_S = TYPE_ONLY_S&&(nbflags[q]&TYPE_BO)==TYPE_S;
-		if(TYPE_ONLY_S) {
-			vels[            index] = 0.0f; // reset velocity for solid lattice points with only boundary neighbors
-			vels[   ubo.Nxyz+index] = 0.0f;
-			vels[2u*ubo.Nxyz+index] = 0.0f;
-		}
-    }else if (flagsn_bo!=TYPE_E) {
-        bool next_to_moving_boundary = false;
-		for(uint q=1u; q<Q; q++) {
-			next_to_moving_boundary = next_to_moving_boundary||((nbflags[q]&TYPE_BO)==TYPE_S&&(vels[nbs[q]]!=0.0f||vels[ubo.Nxyz+nbs[q]]!=0.0f||vels[2u*ubo.Nxyz+nbs[q]]!=0.0f));
-		}
-		flags[index] = flagsn = next_to_moving_boundary ? flagsn|TYPE_MS : flagsn&~TYPE_MS; // mark/unmark cells next to TYPE_S cells with velocity!=0 with TYPE_MS
+        // 计算权重
+        float weight = compute_weight_3d(point_pos, fluid_pos);
+        if (weight == 0.0) continue;
+
+        // 读取由 calc_u.comp 计算好的流体速度
+        vec3 fluid_vel = vec3(
+            vels[fluid_index],
+            vels[ubo.Nxyz + fluid_index],
+            vels[2 * ubo.Nxyz + fluid_index]
+        );
+
+        // 累加带权重的速度
+        interpolated_vel += weight * fluid_vel;
+    }}}
+
+    // --- 3. 计算恢复力 g(k) 和 累加总校正量 Δu(k) ---
+    vec3 g_k = target_vel_k - interpolated_vel; // 恢复力
+
+    // 第一次迭代时，清空总校正量
+    if (ubo.fixed_point_iteration == 0) {
+        lagrangianData[k].force = vec4(0.0);
     }
+    
+    // 论文公式: Δu(k) ← Δu(k) + (uk - u_iter(k))*s(k)
+    // s(k) 是点的代表面积，我们先简化为 1.0
+    float s_k = (4.0f * 3.1415926f * (10.0f * 10.0f)) / ubo.particleCount;
+    lagrangianData[k].force.xyz += g_k * 1.0;
 
-    float feq[Q]; // f_equilibrium
-	calculate_f_eq(rhos[index], vels[index], vels[ubo.Nxyz+index], vels[2u*ubo.Nxyz+index], feq);
-
-    store_f(index, feq, nbs, 1u); // write to fi
+    // 存储中间结果 g(k) 以供 ib_force2 使用
+    // 我们复用 lagrangianData 里的 velocity 字段来临时存储 g(k)
+    lagrangianData[k].velocity.xyz = g_k;
 }

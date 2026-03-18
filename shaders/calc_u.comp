@@ -3,6 +3,7 @@
 
 #define D 3
 #define Q 19
+#define SCALE 1e10
 #define def_c 0.57735027f
 
 #define def_w0 (1.0f/3.0f ) // center (0)
@@ -148,7 +149,7 @@ int c(const uint i) {
 }
 
 float sq(float x) {
-    return pow(x, 2);
+    return x * x;
 }
 
 uvec3 coordinates(const uint n) { // disassemble 1D index to 3D coordinates (n -> x,y,z)
@@ -187,20 +188,18 @@ void neighbors(uint index, inout uint nbs[Q]) {
 void load_f(uint n, inout float fhn[Q], uint nbs[Q], uint t) {
     fhn[0] = load(ddfs, index_f(n, 0u)); // Esoteric-Pull
 	for(uint q = 1u; q < Q; q += 2u) {
-        float f_q, f_q1;
-        if (t%2u != 0u) {
-            f_q = load(ddfs, index_f(n, q));
-            f_q1 = load(ddfs, index_f(nbs[q], q+1u));
-        } else {
-            f_q = load(ddfs, index_f(n, q));
-            f_q1 = load(ddfs, index_f(n, q));
-            if ((flags[nbs[q]] & TYPE_BO) == TYPE_E) {
-                f_q1 = f_q;
-            }
-        }
-        fhn[q] = f_q;
-        fhn[q+1u] = f_q1;
-    }
+		fhn[q   ] = load(ddfs, index_f(n     , t%2u!=0 ? q    : q+1u));
+		fhn[q+1u] = load(ddfs, index_f(nbs[q], t%2u!=0 ? q+1u : q   ));
+	}
+}
+
+void apply_moving_boundaries(inout float fhn[Q], const uint nbs[Q]) {
+    uint ji;
+	for(uint q = 1u; q < Q; q += 2u) {
+		float w6 = -6.0f*w[q];
+		ji = nbs[q+1u]; fhn[q   ] = (flags[ji]&TYPE_BO)==TYPE_S ? fma(w6, c(q+1u)*vels[ji]+c(Q+q+1u)*vels[ubo.Nxyz+ji]+c(2u*Q+q+1u)*vels[2u*ubo.Nxyz+ji], fhn[q   ]) : fhn[q   ];
+		ji = nbs[q   ]; fhn[q+1u] = (flags[ji]&TYPE_BO)==TYPE_S ? fma(w6, c(q   )*vels[ji]+c(Q+q   )*vels[ubo.Nxyz+ji]+c(2u*Q+q   )*vels[2u*ubo.Nxyz+ji], fhn[q+1u]) : fhn[q+1u];
+	}
 }
 
 void store_f(uint n, inout float fhn[Q], uint nbs[Q], uint t) {
@@ -211,16 +210,7 @@ void store_f(uint n, inout float fhn[Q], uint nbs[Q], uint t) {
 	}
 }
 
-void apply_moving_boundaries(inout float fhn[Q], const uint nbs[Q]) {
-    uint ji; // reads velocities of only neighboring boundary cells, which do not change during simulation
-	for(uint q = 1u; q < Q; q += 2u) { // loop is entirely unrolled by compiler, no unnecessary memory access is happening
-		float w6 = -6.0f*w[q]; // w6 = -2*w_i*rho_wall/c^2, w(i) = w(i+1) if i is odd, rho_wall is assumed as rho_avg=1 (necessary choice to assure mass conservation)
-		ji = nbs[q+1u]; fhn[q   ] = (flags[ji]&TYPE_BO)==TYPE_S ? fma(w6, c(q+1u)*vels[ji]+c(Q+q+1u)*vels[ubo.Nxyz+ji]+c(2u*Q+q+1u)*vels[2u*ubo.Nxyz+ji], fhn[q   ]) : fhn[q   ]; // boundary : regular
-		ji = nbs[q   ]; fhn[q+1u] = (flags[ji]&TYPE_BO)==TYPE_S ? fma(w6, c(q   )*vels[ji]+c(Q+q   )*vels[ubo.Nxyz+ji]+c(2u*Q+q   )*vels[2u*ubo.Nxyz+ji], fhn[q+1u]) : fhn[q+1u];
-	}
-}
-
-void calculate_rho_u(float f[Q], inout float rhon, inout float uxn, inout float uyn, inout float uzn) {
+void calculate_rho_u(const float f[Q], inout float rhon, inout float uxn, inout float uyn, inout float uzn) {
     float rho=f[0], ux, uy, uz;
     for(uint q=1u; q<Q; q++) rho += f[q]; // calculate density from fi
 	rho += 1.0f; // add 1.0f last to avoid digit extinction effects when summing up fi (perturbation method / DDF-shifting)
@@ -233,15 +223,15 @@ void calculate_rho_u(float f[Q], inout float rhon, inout float uxn, inout float 
     uzn = uz/rho;
 }
 
-void calculate_forcing_terms(float ux, float uy, float uz, float fx, float fy, float fz, inout float Fin[Q]) {
+void calculate_forcing_terms(const float ux, const float uy, const float uz, const float fx, const float fy, const float fz, inout float Fin[Q]) {
     const float uF = -0.33333334f*fma(ux, fx, fma(uy, fy, uz*fz)); // 3D
-    Fin[0] = 9.0f*w[0]*uF ; // 000 (identical for all velocity sets)
+    Fin[0] = 9.0f*def_w0*uF ; // 000 (identical for all velocity sets)
 	for(uint q=1u; q<Q; q++) { // loop is entirely unrolled by compiler, no unnecessary FLOPs are happening
 		Fin[q] = 9.0f*w[q]*fma(c(q)*fx+c(Q+q)*fy+c(2u*Q+q)*fz, c(q)*ux+c(Q+q)*uy+c(2u*Q+q)*uz+0.33333334f, uF);
 	}
 }
 
-void calculate_f_eq(float rho, float ux, float uy, float uz, inout float feq[Q]) {
+void calculate_f_eq(const float rho, float ux, float uy, float uz, inout float feq[Q]) {
     const float rhom1 = rho-1.0f; // rhom1 is arithmetic optimization to minimize digit extinction
     const float c3 = -3.0f*(sq(ux)+sq(uy)+sq(uz)); // c3 = -2*sq(u)/(2*sq(c))
 	uz *= 3.0f; // only needed for 3D
@@ -261,39 +251,74 @@ void calculate_f_eq(float rho, float ux, float uy, float uz, inout float feq[Q])
 	feq[17] = fma(rhoe, fma(0.5f, fma(u5, u5, c3), u5), rhom1e); feq[18] = fma(rhoe, fma(0.5f, fma(u5, u5, c3), -u5), rhom1e); // 0+- 0-+
 }
 
-void main()
+void apply_inflow_boundary(inout float fhn[Q], uint index) {
+    // If current cell is TYPE_E (inflow boundary), enforce equilibrium with prescribed velocity
+    if ((flags[index] & TYPE_BO) == TYPE_E) {
+        float u_in = vels[2u*ubo.Nxyz + index];
+        if (u_in > 0.0f) {
+            float feq[Q];
+            calculate_f_eq(1.0f, 0.0f, 0.0f, u_in, feq);
+            for (uint q = 0u; q < Q; q++) {
+                fhn[q] = feq[q];
+            }
+        }
+    }
+}
+
+void apply_outflow_boundary(inout float fhn[Q], const uint nbs[Q]) {
+    // For fluid cells next to outflow boundary, use zero-gradient extrapolation
+    for(uint q = 1u; q < Q; q += 2u) {
+        if ((flags[nbs[q+1u]] & TYPE_BO) == TYPE_E) {
+            float u_nb = vels[2u*ubo.Nxyz + nbs[q+1u]];
+            if (u_nb <= 0.0f) {
+                fhn[q] = fhn[q+1u];
+            }
+        }
+        if ((flags[nbs[q]] & TYPE_BO) == TYPE_E) {
+            float u_nb = vels[2u*ubo.Nxyz + nbs[q]];
+            if (u_nb <= 0.0f) {
+                fhn[q+1u] = fhn[q];
+            }
+        }
+    }
+}
+
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() 
 {
     uvec3 globalSize = gl_NumWorkGroups * gl_WorkGroupSize;
     uint index = gl_GlobalInvocationID.z * globalSize.x * globalSize.y + gl_GlobalInvocationID.y * globalSize.x + gl_GlobalInvocationID.x;
     if (index >= ubo.Nxyz) return;
+    
+    uint flagsn = flags[index]; 
+    uint flagsn_bo = flagsn & TYPE_BO;
+    uint flagsn_su = flagsn & TYPE_SU; 
+    
+    // 如果是纯固体或气体，不需要计算流体速度
+    if(flagsn_bo == TYPE_S || flagsn_su == TYPE_G) return;
+    
+    uint nbs[Q];
+    neighbors(index, nbs);
+    
+    float fhn[Q];
+    // 读取经过 Streaming 后的分布函数 (这里利用了你原有的 Esoteric-Pull 逻辑)
+    load_f(index, fhn, nbs, ubo.t);
 
-    uint flagsn = flags[index];
-    uint flagsn_bo = flagsn & TYPE_BO; // extract boundary flags
-
-    uint nbs[Q]; // neighbor indices
-    neighbors(index, nbs); // calculate neighbor indices
-
-    uint nbflags[Q]; // cache neighbor flags for multiple readings
-    for(uint q=1u; q<Q; q++) nbflags[q] = flags[nbs[q]];
-
-    if(flagsn_bo==TYPE_S) { // cell is solid
-		bool TYPE_ONLY_S = true; // has only solid neighbors
-		for(uint q=1u; q<Q; q++) TYPE_ONLY_S = TYPE_ONLY_S&&(nbflags[q]&TYPE_BO)==TYPE_S;
-		if(TYPE_ONLY_S) {
-			vels[            index] = 0.0f; // reset velocity for solid lattice points with only boundary neighbors
-			vels[   ubo.Nxyz+index] = 0.0f;
-			vels[2u*ubo.Nxyz+index] = 0.0f;
-		}
-    }else if (flagsn_bo!=TYPE_E) {
-        bool next_to_moving_boundary = false;
-		for(uint q=1u; q<Q; q++) {
-			next_to_moving_boundary = next_to_moving_boundary||((nbflags[q]&TYPE_BO)==TYPE_S&&(vels[nbs[q]]!=0.0f||vels[ubo.Nxyz+nbs[q]]!=0.0f||vels[2u*ubo.Nxyz+nbs[q]]!=0.0f));
-		}
-		flags[index] = flagsn = next_to_moving_boundary ? flagsn|TYPE_MS : flagsn&~TYPE_MS; // mark/unmark cells next to TYPE_S cells with velocity!=0 with TYPE_MS
+    // 处理现有的运动边界条件（如果有的话）
+    if (flagsn == TYPE_MS) { 
+        apply_moving_boundaries(fhn, nbs); 
     }
-
-    float feq[Q]; // f_equilibrium
-	calculate_f_eq(rhos[index], vels[index], vels[ubo.Nxyz+index], vels[2u*ubo.Nxyz+index], feq);
-
-    store_f(index, feq, nbs, 1u); // write to fi
+    
+    float rhon, uxn, uyn, uzn; 
+    if(flagsn_bo != TYPE_E) {
+        // 核心：计算出宏观速度和密度
+        calculate_rho_u(fhn, rhon, uxn, uyn, uzn); 
+        
+        // 【关键】提前将速度和密度写回显存，供 IBM 插值读取
+        rhos[index]             = rhon; 
+        vels[index]             = uxn; 
+        vels[ubo.Nxyz + index]  = uyn;
+        vels[2u * ubo.Nxyz + index] = uzn;
+    }
 }

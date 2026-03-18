@@ -103,6 +103,7 @@ layout (std430, binding = 0) uniform SimulateUBO {
     float dt;
     uint t;
     uint render_mode;
+    uint fixed_point_iteration;
 } ubo;
 
 layout(std430, binding = 1) buffer Particles {
@@ -126,7 +127,7 @@ layout(std430, binding = 5) buffer DDF {
 };
 
 layout(std430, binding = 6) buffer BorderForce {
-    int bfs[];
+    float bfs[];
 };
 
 layout(std430, binding = 7) buffer LagrangianPoints {
@@ -301,10 +302,7 @@ void main()
     if (flagsn == TYPE_MS) { // MOVING_BOUNDARIES
         apply_moving_boundaries(fhn, nbs); // apply Dirichlet velocity boundaries if necessary (reads velocities of only neighboring boundary cells, which do not change during simulation)
     }
-    
-    //apply_inflow_boundary(fhn, index); // apply inflow boundary conditions for TYPE_E boundaries
-    //apply_outflow_boundary(fhn, nbs); // apply outflow boundary conditions (zero-gradient extrapolation)
-    
+
     float rhon, uxn, uyn, uzn; // calculate local density and velocity for collision
     if(flagsn_bo==TYPE_E) {
         rhon = rhos[            index]; // apply preset velocity/density
@@ -320,9 +318,9 @@ void main()
     
     // FORCE_FIELD
     { // separate block to avoid variable name conflicts
-		fxn += float(bfs[            index]) / SCALE; // apply force field
-		fyn += float(bfs[   ubo.Nxyz+index]) / SCALE;
-		fzn += float(bfs[2u*ubo.Nxyz+index]) / SCALE;
+		fxn += float(bfs[            index]); // apply force field
+		fyn += float(bfs[   ubo.Nxyz+index]);
+		fzn += float(bfs[2u*ubo.Nxyz+index]);
 	}
 
     // VOLUME_FORCE
