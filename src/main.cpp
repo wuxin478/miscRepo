@@ -225,7 +225,7 @@ private:
     bool framebufferResized = false;
     bool isInit = false;
     uint32_t currentTime = 0;
-    bool show_diagnostic_particles = false;
+    int render_mode = 1;
 
     VkInstance instance;
     VkDebugUtilsMessengerEXT debugMessenger;
@@ -338,16 +338,6 @@ private:
         {{ Nx,  0, Nz,  0 }, { 1,  1,  1,  1 }},  // 5
         {{  0, Ny, Nz,  0 }, { 1,  1,  1,  1 }},  // 6
         {{ Nx, Ny, Nz,  0 }, { 1,  1,  1,  1 }},  // 7
-
-
-        {{ Nx/2-16, Ny/2-16,  Nz/2-16,  0 }, { 1,  1,  1,  1 }},  //  8
-        {{ Nx/2+16, Ny/2-16,  Nz/2-16,  0 }, { 1,  1,  1,  1 }},  //  9
-        {{ Nx/2-16, Ny/2+16,  Nz/2-16,  0 }, { 1,  1,  1,  1 }},  // 10
-        {{ Nx/2-16, Ny/2-16,  Nz/2+16,  0 }, { 1,  1,  1,  1 }},  // 11
-        {{ Nx/2+16, Ny/2+16,  Nz/2-16,  0 }, { 1,  1,  1,  1 }},  // 12
-        {{ Nx/2+16, Ny/2-16,  Nz/2+16,  0 }, { 1,  1,  1,  1 }},  // 13
-        {{ Nx/2-16, Ny/2+16,  Nz/2+16,  0 }, { 1,  1,  1,  1 }},  // 14
-        {{ Nx/2+16, Ny/2+16,  Nz/2+16,  0 }, { 1,  1,  1,  1 }},  // 15
     };
 
     std::vector<uint32_t> wireframeIndices = {
@@ -363,19 +353,6 @@ private:
          5,  7,
          6,  7,
          3,  6,
-
-         8,  9,
-         9, 12,
-        12, 10,
-        10,  8,
-         9, 13,
-         8, 11,
-        12, 15,
-        10, 14,
-        11, 13,
-        13, 15,
-        14, 15,
-        11, 14,
     };
 
     std::vector<glm::vec3> skyboxVertices = {
@@ -455,7 +432,6 @@ private:
         glfwSetCursorPosCallback(window, mouse_move_callback);
         glfwSetScrollCallback(window, scroll_callback);
         glfwSetMouseButtonCallback(window, mouse_button_callback);
-        glfwSetKeyCallback(window, key_callback);
 
         lastTime = glfwGetTime();
     }
@@ -524,14 +500,6 @@ private:
             else {
                 glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
             }
-        }
-    }
-
-    static void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
-        auto app = reinterpret_cast<ComputeShaderApplication*>(glfwGetWindowUserPointer(window));
-
-        if (key == GLFW_KEY_D && action == GLFW_PRESS) {
-            app->show_diagnostic_particles = !app->show_diagnostic_particles;
         }
     }
 
@@ -632,8 +600,8 @@ private:
             
             {
                 ImGui::Begin("Particle Settings");
-                ImGui::Checkbox("Diagnostic Particles", &show_diagnostic_particles);
-                ImGui::Text("Press 'D' to toggle diagnostic mode");
+                const char* render_modes[] = { "Normal Particles", "Diagnostic Particles" };
+                ImGui::Combo("Render Mode", &render_mode, render_modes, IM_ARRAYSIZE(render_modes));
                 ImGui::Text("FPS: %.1f", 1000.0f / lastFrameTime);
                 ImGui::Text("Particles: %d", particle_count);
                 ImGui::End();
@@ -2955,7 +2923,7 @@ private:
         }
 
         {
-            VkPipeline currentPipeline = show_diagnostic_particles ? diagnosticPipeline : graphicsPipeline;
+            VkPipeline currentPipeline = (render_mode == 1) ? diagnosticPipeline : graphicsPipeline;
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &graphicsDescriptorSets[currentFrame], 0, nullptr);
 
@@ -3103,7 +3071,7 @@ private:
             ubo.Nx = Nx;
             ubo.Ny = Ny;
             ubo.Nz = Nz;
-            ubo.render_mode = show_diagnostic_particles ? 1 : 0;
+            ubo.render_mode = render_mode;
             ubo.model = glm::mat4(1.0f);
             ubo.view = glm::lookAt(cameraPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
             //ubo.view = glm::lookAt(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
@@ -3129,7 +3097,7 @@ private:
             ubo.fz = 0.0f;
             ubo.dt = lastFrameTime / 1000.0f;
             ubo.t = currentTime;
-            ubo.render_mode = show_diagnostic_particles ? 1 : 0;
+            ubo.render_mode = render_mode;
             memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
 
             currentTime += 1;
