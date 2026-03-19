@@ -105,6 +105,7 @@ layout (std430, binding = 0) uniform SimulateUBO {
     uint t;
     uint render_mode;
     uint fixed_point_iteration;
+    mat4 modelMatrix;
 } ubo;
 
 layout(std430, binding = 1) buffer Particles {
@@ -137,6 +138,10 @@ layout(std430, binding = 7) buffer LagrangianPoints {
 
 layout(std430, binding = 8) buffer LagrangianDataBuffer {
     LagrangianData lagrangianData[];
+};
+
+layout(std430, binding = 11) buffer TempForce {
+    vec4 tempForces[];
 };
 
 layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -317,10 +322,7 @@ void main()
     // --- 1. 获取拉格朗日点的位置和目标速度 ---
     vec3 point_pos = lagrangianPoints[k].position.xyz;
     
-    // TODO: 设置该点的目标速度 uk。对于静止物体，它就是 (0,0,0)。
-    // 对于运动物体，你需要从 CPU 传入它的速度，或者像论文中那样通过 M(t) 矩阵计算。
-    // 我们先假设是静止的。
-    vec3 target_vel_k = vec3(0.0, 0.0, 0.0);
+    vec3 target_vel_k = lagrangianData[k].velocity.xyz;
     
     // --- 2. 插值计算该点的流体速度 u_iter(k) ---
     vec3 interpolated_vel = vec3(0.0);
@@ -368,7 +370,6 @@ void main()
     float s_k = (4.0f * 3.1415926f * (10.0f * 10.0f)) / ubo.particleCount;
     lagrangianData[k].force.xyz += g_k * 1.0;
 
-    // 存储中间结果 g(k) 以供 ib_force2 使用
-    // 我们复用 lagrangianData 里的 velocity 字段来临时存储 g(k)
-    lagrangianData[k].velocity.xyz = g_k;
+    // 存储中间结果 g(k) 到临时 Buffer
+    tempForces[k].xyz = g_k;
 }

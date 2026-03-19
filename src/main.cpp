@@ -126,6 +126,7 @@ struct SimulateUBO {
     alignas(4) uint32_t t = 0;
     alignas(4) uint32_t render_mode = 0;
     alignas(4) uint32_t fixed_point_iteration = 0;
+    alignas(16) glm::mat4 modelMatrix = glm::mat4(1.0f);
 };
 
 struct RenderingUBO {
@@ -276,6 +277,7 @@ private:
     VkPipeline calcUPipeline;
     VkPipeline updateMacroPipeline;
     VkPipeline applyBCPipeline;
+    VkPipeline updatePositionsPipeline;
 
     VkCommandPool commandPool;
 
@@ -294,8 +296,14 @@ private:
 
     std::vector<VkBuffer> lagrangianPointsBuffers;
     std::vector<VkDeviceMemory> lagrangianPointsBuffersMemory;
+    std::vector<VkBuffer> lagrangianPointsRestBuffers;
+    std::vector<VkDeviceMemory> lagrangianPointsRestBuffersMemory;
+    std::vector<VkBuffer> lagrangianPointsPrevBuffers;
+    std::vector<VkDeviceMemory> lagrangianPointsPrevBuffersMemory;
     std::vector<VkBuffer> lagrangianDataBuffers;
     std::vector<VkDeviceMemory> lagrangianDataBuffersMemory;
+    std::vector<VkBuffer> tempForcesBuffers;
+    std::vector<VkDeviceMemory> tempForcesBuffersMemory;
 
     std::vector<VkBuffer> wireframeBuffers;
     std::vector<VkDeviceMemory> wireframeBuffersMemory;
@@ -663,6 +671,7 @@ private:
         vkDestroyPipeline(device, calcUPipeline, nullptr);
         vkDestroyPipeline(device, updateMacroPipeline, nullptr);
         vkDestroyPipeline(device, applyBCPipeline, nullptr);
+        vkDestroyPipeline(device, updatePositionsPipeline, nullptr);
 
         vkDestroyRenderPass(device, renderPass, nullptr);
 
@@ -687,8 +696,14 @@ private:
             vkFreeMemory(device, borderForceBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, lagrangianPointsBuffers[i], nullptr);
             vkFreeMemory(device, lagrangianPointsBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, lagrangianPointsRestBuffers[i], nullptr);
+            vkFreeMemory(device, lagrangianPointsRestBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, lagrangianPointsPrevBuffers[i], nullptr);
+            vkFreeMemory(device, lagrangianPointsPrevBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, lagrangianDataBuffers[i], nullptr);
             vkFreeMemory(device, lagrangianDataBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, tempForcesBuffers[i], nullptr);
+            vkFreeMemory(device, tempForcesBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, wireframeBuffers[i], nullptr);
             vkFreeMemory(device, wireframeBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, wireframeIndexBuffers[i], nullptr);
@@ -1070,7 +1085,7 @@ private:
     }
 
     void createComputeDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 9> layoutBindings{};
+        std::array<VkDescriptorSetLayoutBinding, 12> layoutBindings{};
 
         // ubo
         layoutBindings[0].binding = 0;
@@ -1134,6 +1149,27 @@ private:
         layoutBindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         layoutBindings[8].pImmutableSamplers = nullptr;
         layoutBindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // lagrangianPointsRest
+        layoutBindings[9].binding = 9;
+        layoutBindings[9].descriptorCount = 1;
+        layoutBindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[9].pImmutableSamplers = nullptr;
+        layoutBindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // lagrangianPointsPrev
+        layoutBindings[10].binding = 10;
+        layoutBindings[10].descriptorCount = 1;
+        layoutBindings[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[10].pImmutableSamplers = nullptr;
+        layoutBindings[10].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // tempForces
+        layoutBindings[11].binding = 11;
+        layoutBindings[11].descriptorCount = 1;
+        layoutBindings[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[11].pImmutableSamplers = nullptr;
+        layoutBindings[11].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -2000,6 +2036,29 @@ private:
         }
 
         {
+            auto computeShaderCode = readFile("shaders/update_positions_comp.spv");
+
+            VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
+
+            VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
+            computeShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            computeShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            computeShaderStageInfo.module = computeShaderModule;
+            computeShaderStageInfo.pName = "main";
+
+            VkComputePipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+            pipelineInfo.layout = computePipelineLayout;
+            pipelineInfo.stage = computeShaderStageInfo;
+
+            if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &updatePositionsPipeline) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create compute pipeline!");
+            }
+
+            vkDestroyShaderModule(device, computeShaderModule, nullptr);
+        }
+
+        {
             auto computeShaderCode = readFile("shaders/calc_comp.spv");
 
             VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
@@ -2303,15 +2362,11 @@ private:
 
         // Lagrangian Points - generate sphere point cloud
         {
-            std::vector<LagrangianPoint> lagrangianPoints(lagrangianPointCount);
+            std::vector<LagrangianPoint> lagrangianPointsRest(lagrangianPointCount);
             std::vector<LagrangianData> lagrangianData(lagrangianPointCount);
 
-            float centerX = Nx / 2.0f;
-            float centerY = Ny / 2.0f;
-            float centerZ = Nz / 2.0f;
             float radius = 15.0f;
 
-            // Generate sphere point cloud using Fibonacci lattice
             for (uint32_t i = 0; i < lagrangianPointCount; i++) {
                 float y = 1.0f - (i / float(lagrangianPointCount - 1)) * 2.0f;
                 float radiusAtY = sqrt(1.0f - y * y);
@@ -2320,12 +2375,7 @@ private:
                 float x = cos(theta) * radiusAtY;
                 float z = sin(theta) * radiusAtY;
 
-                lagrangianPoints[i].position = glm::vec4(
-                    centerX + x * radius,
-                    centerY + y * radius,
-                    centerZ + z * radius,
-                    1.0f
-                );
+                lagrangianPointsRest[i].position = glm::vec4(x * radius, y * radius, z * radius, 1.0f);
 
                 lagrangianData[i].velocity = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
                 lagrangianData[i].force = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -2336,6 +2386,10 @@ private:
 
             lagrangianPointsBuffers.resize(MAX_FRAMES_IN_FLIGHT);
             lagrangianPointsBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+            lagrangianPointsRestBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            lagrangianPointsRestBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+            lagrangianPointsPrevBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            lagrangianPointsPrevBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
             lagrangianDataBuffers.resize(MAX_FRAMES_IN_FLIGHT);
             lagrangianDataBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
 
@@ -2343,21 +2397,45 @@ private:
             VkDeviceMemory stagingBufferMemory;
             void* data;
 
-            // Create and upload lagrangianPointsBuffer
             createBuffer(pointsBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
             vkMapMemory(device, stagingBufferMemory, 0, pointsBufferSize, 0, &data);
-            memcpy(data, lagrangianPoints.data(), (size_t)pointsBufferSize);
+            memcpy(data, lagrangianPointsRest.data(), (size_t)pointsBufferSize);
             vkUnmapMemory(device, stagingBufferMemory);
 
             for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-                createBuffer(pointsBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, lagrangianPointsBuffers[i], lagrangianPointsBuffersMemory[i]);
+                createBuffer(pointsBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, lagrangianPointsBuffers[i], lagrangianPointsBuffersMemory[i]);
                 copyBuffer(stagingBuffer, lagrangianPointsBuffers[i], pointsBufferSize);
             }
 
             vkDestroyBuffer(device, stagingBuffer, nullptr);
             vkFreeMemory(device, stagingBufferMemory, nullptr);
 
-            // Create and upload lagrangianDataBuffer
+            createBuffer(pointsBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+            vkMapMemory(device, stagingBufferMemory, 0, pointsBufferSize, 0, &data);
+            memcpy(data, lagrangianPointsRest.data(), (size_t)pointsBufferSize);
+            vkUnmapMemory(device, stagingBufferMemory);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                createBuffer(pointsBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, lagrangianPointsRestBuffers[i], lagrangianPointsRestBuffersMemory[i]);
+                copyBuffer(stagingBuffer, lagrangianPointsRestBuffers[i], pointsBufferSize);
+            }
+
+            vkDestroyBuffer(device, stagingBuffer, nullptr);
+            vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+            createBuffer(pointsBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+            vkMapMemory(device, stagingBufferMemory, 0, pointsBufferSize, 0, &data);
+            memcpy(data, lagrangianPointsRest.data(), (size_t)pointsBufferSize);
+            vkUnmapMemory(device, stagingBufferMemory);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                createBuffer(pointsBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, lagrangianPointsPrevBuffers[i], lagrangianPointsPrevBuffersMemory[i]);
+                copyBuffer(stagingBuffer, lagrangianPointsPrevBuffers[i], pointsBufferSize);
+            }
+
+            vkDestroyBuffer(device, stagingBuffer, nullptr);
+            vkFreeMemory(device, stagingBufferMemory, nullptr);
+
             createBuffer(dataBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
             vkMapMemory(device, stagingBufferMemory, 0, dataBufferSize, 0, &data);
             memcpy(data, lagrangianData.data(), (size_t)dataBufferSize);
@@ -2370,6 +2448,14 @@ private:
 
             vkDestroyBuffer(device, stagingBuffer, nullptr);
             vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+            VkDeviceSize tempForceBufferSize = sizeof(glm::vec4) * lagrangianPointCount;
+            tempForcesBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            tempForcesBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                createBuffer(tempForceBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tempForcesBuffers[i], tempForcesBuffersMemory[i]);
+            }
         }
     }
 
@@ -2787,7 +2873,7 @@ private:
             uniformBufferInfo.offset = 0;
             uniformBufferInfo.range = sizeof(SimulateUBO);
 
-            std::array<VkWriteDescriptorSet, 9> descriptorWrites{};
+            std::array<VkWriteDescriptorSet, 12> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = computeDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -2899,6 +2985,45 @@ private:
             descriptorWrites[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[8].descriptorCount = 1;
             descriptorWrites[8].pBufferInfo = &lagrangianDataBufferInfo;
+
+            VkDescriptorBufferInfo lagrangianPointsRestBufferInfo{};
+            lagrangianPointsRestBufferInfo.buffer = lagrangianPointsRestBuffers[i];
+            lagrangianPointsRestBufferInfo.offset = 0;
+            lagrangianPointsRestBufferInfo.range = sizeof(LagrangianPoint) * lagrangianPointCount;
+
+            descriptorWrites[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[9].dstSet = computeDescriptorSets[i];
+            descriptorWrites[9].dstBinding = 9;
+            descriptorWrites[9].dstArrayElement = 0;
+            descriptorWrites[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[9].descriptorCount = 1;
+            descriptorWrites[9].pBufferInfo = &lagrangianPointsRestBufferInfo;
+
+            VkDescriptorBufferInfo lagrangianPointsPrevBufferInfo{};
+            lagrangianPointsPrevBufferInfo.buffer = lagrangianPointsPrevBuffers[i];
+            lagrangianPointsPrevBufferInfo.offset = 0;
+            lagrangianPointsPrevBufferInfo.range = sizeof(LagrangianPoint) * lagrangianPointCount;
+
+            descriptorWrites[10].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[10].dstSet = computeDescriptorSets[i];
+            descriptorWrites[10].dstBinding = 10;
+            descriptorWrites[10].dstArrayElement = 0;
+            descriptorWrites[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[10].descriptorCount = 1;
+            descriptorWrites[10].pBufferInfo = &lagrangianPointsPrevBufferInfo;
+
+            VkDescriptorBufferInfo tempForcesBufferInfo{};
+            tempForcesBufferInfo.buffer = tempForcesBuffers[i];
+            tempForcesBufferInfo.offset = 0;
+            tempForcesBufferInfo.range = sizeof(glm::vec4) * lagrangianPointCount;
+
+            descriptorWrites[11].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[11].dstSet = computeDescriptorSets[i];
+            descriptorWrites[11].dstBinding = 11;
+            descriptorWrites[11].dstArrayElement = 0;
+            descriptorWrites[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[11].descriptorCount = 1;
+            descriptorWrites[11].pBufferInfo = &tempForcesBufferInfo;
 
             vkUpdateDescriptorSets(device, descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
         }
@@ -3229,7 +3354,6 @@ private:
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, initPipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
             vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
-            //vkCmdDispatch(commandBuffer, sqrt(PARTICLE_COUNT) / 16, sqrt(PARTICLE_COUNT) / 16, 1);
             vkCmdDispatch(commandBuffer, Nxyz / 256 + 1, 1, 1);
 
             isInit = true;
@@ -3242,6 +3366,13 @@ private:
         fillmemorybarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &fillmemorybarrier, 0, nullptr, 0, nullptr);
 
+        if (enIBM) {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, updatePositionsPipeline);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
+            vkCmdDispatch(commandBuffer, lagrangianPointCount / 256 + 1, 1, 1);
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
+        }
+
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, calcUPipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
         vkCmdDispatch(commandBuffer, Nxyz / 256 + 1, 1, 1);
@@ -3249,39 +3380,34 @@ private:
 
         if (enIBM) {
             for (int i = 0; i < 5; ++i) {
-                // 准备要写入的数据（i 的副本）
                 int iteration = i;
 
-                // 更新 Uniform Buffer 中的 fixed_point_iteration 字段
                 vkCmdUpdateBuffer(
                     commandBuffer,
-                    uniformBuffers[currentFrame],                // 目标缓冲区
-                    offsetof(SimulateUBO, fixed_point_iteration), // 偏移量
-                    sizeof(int),                                 // 数据大小
-                    &iteration);                                 // 主机端数据指针（录制时拷贝）
+                    uniformBuffers[currentFrame],
+                    offsetof(SimulateUBO, fixed_point_iteration),
+                    sizeof(int),
+                    &iteration);
 
-                // 插入屏障：确保传输写入对计算着色器可见
                 VkMemoryBarrier uboUpdateBarrier{};
                 uboUpdateBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
                 uboUpdateBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                uboUpdateBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT; // 计算着色器需要读 UBO
+                uboUpdateBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
                 vkCmdPipelineBarrier(
                     commandBuffer,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT,              // 源阶段：更新缓冲区
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,        // 目标阶段：计算着色器
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     0,
                     1, &uboUpdateBarrier,
                     0, nullptr,
                     0, nullptr);
                 
-                // 1. Fluid -> Boundary (计算恢复力)
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ibmForce1Pipeline);
                 vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
                 vkCmdDispatch(commandBuffer, lagrangianPointCount / 256 + 1, 1, 1);
                 vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
                 
-                // 2. Boundary -> Fluid (扩散力/更新速度)
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, ibmForce2Pipeline);
                 vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
                 vkCmdDispatch(commandBuffer, lagrangianPointCount / 256 + 1, 1, 1);
@@ -3299,6 +3425,20 @@ private:
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
             vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
             vkCmdDispatch(commandBuffer, particle_count / 256 + 1, 1, 1);
+        }
+
+        if (enIBM) {
+            VkBufferCopy copyRegion{};
+            copyRegion.srcOffset = 0;
+            copyRegion.dstOffset = 0;
+            copyRegion.size = sizeof(LagrangianPoint) * lagrangianPointCount;
+            vkCmdCopyBuffer(commandBuffer, lagrangianPointsBuffers[currentFrame], lagrangianPointsPrevBuffers[currentFrame], 1, &copyRegion);
+
+            VkMemoryBarrier copyBarrier{};
+            copyBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            copyBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            copyBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &copyBarrier, 0, nullptr, 0, nullptr);
         }
 
 
@@ -3372,6 +3512,19 @@ private:
             ubo.dt = lastFrameTime / 1000.0f;
             ubo.t = currentTime;
             ubo.render_mode = render_mode;
+
+            float angular_velocity = 0.033f;
+            float current_angle = currentTime * angular_velocity;
+
+            glm::mat4 M = glm::mat4(1.0f);
+            glm::vec3 rotation_axis = glm::vec3(0.0f, 0.0f, 1.0f);
+            glm::vec3 object_center = glm::vec3(Nx / 2.0f, Ny / 2.0f, Nz / 2.0f);
+
+            M = glm::translate(M, object_center);
+            M = glm::rotate(M, current_angle, rotation_axis);
+
+            ubo.modelMatrix = M;
+
             memcpy(uniformBuffersMapped[currentFrame], &ubo, sizeof(ubo));
 
             currentTime += 1;

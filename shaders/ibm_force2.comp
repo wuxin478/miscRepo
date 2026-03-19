@@ -105,6 +105,7 @@ layout (std430, binding = 0) uniform SimulateUBO {
     uint t;
     uint render_mode;
     uint fixed_point_iteration;
+    mat4 modelMatrix;
 } ubo;
 
 layout(std430, binding = 1) buffer Particles {
@@ -137,6 +138,10 @@ layout(std430, binding = 7) buffer LagrangianPoints {
 
 layout(std430, binding = 8) buffer LagrangianDataBuffer {
     LagrangianData lagrangianData[];
+};
+
+layout(std430, binding = 11) buffer TempForce {
+    vec4 tempForces[];
 };
 
 layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
@@ -315,16 +320,13 @@ void main()
 
     vec3 point_pos = lagrangianPoints[k].position.xyz;
 
-    // --- 1. 判断是中间迭代还是最后一次迭代 ---
     bool is_last_iteration = (ubo.fixed_point_iteration == 4);
 
     vec3 force_to_spread;
     if (is_last_iteration) {
-        // 最后一次，我们扩散累积的总校正量 Δu(k) 到最终的力场 bfs
         force_to_spread = lagrangianData[k].force.xyz;
     } else {
-        // 中间迭代，我们扩散恢复力 g(k) 来更新下一次迭代的流体速度场 vels
-        force_to_spread = lagrangianData[k].velocity.xyz; // 读取 ib_force1 存的 g(k)
+        force_to_spread = tempForces[k].xyz;
     }
 
     // --- 2. 将力扩散到周围的 5x5x5 流体晶格 ---

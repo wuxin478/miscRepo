@@ -1,0 +1,71 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_scalar_block_layout : require
+
+#define D 3
+#define Q 19
+
+struct LagrangianPoint {
+    vec4 position;
+};
+
+struct LagrangianData {
+    vec4 velocity;
+    vec4 force;
+};
+
+layout (std430, binding = 0) uniform SimulateUBO {
+    uint Nx;
+    uint Ny;
+    uint Nz;
+    uint Nxyz;
+    uint particleCount;
+    float particleRho;
+    float niu;
+    float tau;
+    float inv_tau;
+    float fx;
+    float fy;
+    float fz;
+    float dt;
+    uint t;
+    uint render_mode;
+    uint fixed_point_iteration;
+    mat4 modelMatrix;
+} ubo;
+
+layout(std430, binding = 7) buffer LagrangianPoints {
+    LagrangianPoint lagrangianPoints[];
+};
+
+layout(std430, binding = 8) buffer LagrangianDataBuffer {
+    LagrangianData lagrangianData[];
+};
+
+layout(std430, binding = 9) buffer LagrangianPointsRest {
+    LagrangianPoint lagrangianPoints_Rest[];
+};
+
+layout(std430, binding = 10) buffer LagrangianPointsPrev {
+    LagrangianPoint lagrangianPoints_Prev[];
+};
+
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint k = gl_GlobalInvocationID.x;
+    if (k >= ubo.particleCount) return;
+
+    vec4 rest_pos = lagrangianPoints_Rest[k].position;
+
+    vec4 current_world_pos = ubo.modelMatrix * rest_pos;
+
+    vec3 prev_world_pos = lagrangianPoints_Prev[k].position.xyz;
+
+    vec3 target_vel_k = (current_world_pos.xyz - prev_world_pos);
+
+    lagrangianPoints[k].position = current_world_pos;
+    if (ubo.t != 0) {
+        lagrangianData[k].velocity.xyz = target_vel_k;
+    }
+}
