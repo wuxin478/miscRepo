@@ -31,6 +31,7 @@ layout (std430, binding = 0) uniform SimulateUBO {
     uint t;
     uint render_mode;
     uint fixed_point_iteration;
+    uint lagrangianPointCount;
     mat4 modelMatrix;
 } ubo;
 

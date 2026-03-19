@@ -9,8 +9,11 @@
 #include "imgui_impl_vulkan.h"
 
 #define GLM_FORCE_RADIANS
+#define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/quaternion.hpp>
 
 #include <iostream>
 #include <fstream>
@@ -55,7 +58,7 @@ const uint32_t Q = 19;
 
 const int MAX_FRAMES_IN_FLIGHT = 1;
 
-const uint32_t lagrangianPointCount = 10000;
+const uint32_t lagrangianPointCount = 4096;
 
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation",
@@ -126,6 +129,7 @@ struct SimulateUBO {
     alignas(4) uint32_t t = 0;
     alignas(4) uint32_t render_mode = 0;
     alignas(4) uint32_t fixed_point_iteration = 0;
+    alignas(4) uint32_t lagrangianPointCount = 0;
     alignas(16) glm::mat4 modelMatrix = glm::mat4(1.0f);
 };
 
@@ -208,6 +212,38 @@ struct LagrangianData {
     alignas(16) glm::vec4 force;
 };
 
+struct TotalForceTorque {
+    alignas(16) glm::vec4 total_force;
+    alignas(16) glm::vec4 total_torque;
+};
+
+struct RigidBody {
+    float rho;
+    float radius;
+    float mass;
+    float inv_mass;
+    glm::mat3 inertiaTensor;
+    glm::mat3 invInertiaTensor;
+    glm::vec3 position;
+    glm::quat orientation;
+    glm::vec3 linear_velocity;
+    glm::vec3 angular_velocity;
+
+    RigidBody() {
+        rho = 1.2f;
+        radius = 8.0f;
+        mass = rho * radius * radius * radius * 3.1415926f * 4.0f / 3.0f;
+        inv_mass = 1.0f / mass;
+        float I = 0.4f * mass * radius * radius;
+        inertiaTensor = glm::mat3(I);
+        invInertiaTensor = glm::mat3(1.0f / I);
+        position = glm::vec3(Nx / 2.0f, Ny / 2.0f, Nz * 3.0f / 4.0f);
+        orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        linear_velocity = glm::vec3(0.0f);
+        angular_velocity = glm::vec3(0.0f, 0.0f, 0.02f);
+    }
+};
+
 class ComputeShaderApplication {
 public:
     void run() {
@@ -278,6 +314,7 @@ private:
     VkPipeline updateMacroPipeline;
     VkPipeline applyBCPipeline;
     VkPipeline updatePositionsPipeline;
+    VkPipeline forceReductionPipeline;
 
     VkCommandPool commandPool;
 
@@ -304,6 +341,12 @@ private:
     std::vector<VkDeviceMemory> lagrangianDataBuffersMemory;
     std::vector<VkBuffer> tempForcesBuffers;
     std::vector<VkDeviceMemory> tempForcesBuffersMemory;
+
+    std::vector<VkBuffer> totalForceTorqueBuffers;
+    std::vector<VkDeviceMemory> totalForceTorqueBuffersMemory;
+    std::vector<void*> totalForceTorqueBuffersMapped;
+
+    RigidBody mySphere;
 
     std::vector<VkBuffer> wireframeBuffers;
     std::vector<VkDeviceMemory> wireframeBuffersMemory;
@@ -672,6 +715,7 @@ private:
         vkDestroyPipeline(device, updateMacroPipeline, nullptr);
         vkDestroyPipeline(device, applyBCPipeline, nullptr);
         vkDestroyPipeline(device, updatePositionsPipeline, nullptr);
+        vkDestroyPipeline(device, forceReductionPipeline, nullptr);
 
         vkDestroyRenderPass(device, renderPass, nullptr);
 
@@ -704,6 +748,8 @@ private:
             vkFreeMemory(device, lagrangianDataBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, tempForcesBuffers[i], nullptr);
             vkFreeMemory(device, tempForcesBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, totalForceTorqueBuffers[i], nullptr);
+            vkFreeMemory(device, totalForceTorqueBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, wireframeBuffers[i], nullptr);
             vkFreeMemory(device, wireframeBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, wireframeIndexBuffers[i], nullptr);
@@ -1085,7 +1131,7 @@ private:
     }
 
     void createComputeDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 12> layoutBindings{};
+        std::array<VkDescriptorSetLayoutBinding, 13> layoutBindings{};
 
         // ubo
         layoutBindings[0].binding = 0;
@@ -1170,6 +1216,13 @@ private:
         layoutBindings[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         layoutBindings[11].pImmutableSamplers = nullptr;
         layoutBindings[11].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // totalForceTorque
+        layoutBindings[12].binding = 12;
+        layoutBindings[12].descriptorCount = 1;
+        layoutBindings[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[12].pImmutableSamplers = nullptr;
+        layoutBindings[12].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -2059,6 +2112,29 @@ private:
         }
 
         {
+            auto computeShaderCode = readFile("shaders/force_reduction_comp.spv");
+
+            VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
+
+            VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
+            computeShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            computeShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            computeShaderStageInfo.module = computeShaderModule;
+            computeShaderStageInfo.pName = "main";
+
+            VkComputePipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+            pipelineInfo.layout = computePipelineLayout;
+            pipelineInfo.stage = computeShaderStageInfo;
+
+            if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &forceReductionPipeline) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create compute pipeline!");
+            }
+
+            vkDestroyShaderModule(device, computeShaderModule, nullptr);
+        }
+
+        {
             auto computeShaderCode = readFile("shaders/calc_comp.spv");
 
             VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
@@ -2365,7 +2441,7 @@ private:
             std::vector<LagrangianPoint> lagrangianPointsRest(lagrangianPointCount);
             std::vector<LagrangianData> lagrangianData(lagrangianPointCount);
 
-            float radius = 15.0f;
+            float radius = mySphere.radius;
 
             for (uint32_t i = 0; i < lagrangianPointCount; i++) {
                 float y = 1.0f - (i / float(lagrangianPointCount - 1)) * 2.0f;
@@ -2456,6 +2532,29 @@ private:
             for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
                 createBuffer(tempForceBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tempForcesBuffers[i], tempForcesBuffersMemory[i]);
             }
+
+            VkDeviceSize totalForceTorqueBufferSize = sizeof(TotalForceTorque);
+            totalForceTorqueBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            totalForceTorqueBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+            totalForceTorqueBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+
+            TotalForceTorque initialForceTorque{};
+            initialForceTorque.total_force = glm::vec4(0.0f);
+            initialForceTorque.total_torque = glm::vec4(0.0f);
+
+            createBuffer(totalForceTorqueBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+            vkMapMemory(device, stagingBufferMemory, 0, totalForceTorqueBufferSize, 0, &data);
+            memcpy(data, &initialForceTorque, (size_t)totalForceTorqueBufferSize);
+            vkUnmapMemory(device, stagingBufferMemory);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                createBuffer(totalForceTorqueBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, totalForceTorqueBuffers[i], totalForceTorqueBuffersMemory[i]);
+                copyBuffer(stagingBuffer, totalForceTorqueBuffers[i], totalForceTorqueBufferSize);
+                vkMapMemory(device, totalForceTorqueBuffersMemory[i], 0, totalForceTorqueBufferSize, 0, &totalForceTorqueBuffersMapped[i]);
+            }
+
+            vkDestroyBuffer(device, stagingBuffer, nullptr);
+            vkFreeMemory(device, stagingBufferMemory, nullptr);
         }
     }
 
@@ -2573,7 +2672,7 @@ private:
                     float dist = sqrt(dx * dx + dy * dy);
                     float maxDist = sqrt(cx * cx + cy * cy);
                     float t = std::min(dist / maxDist, 1.0f);
-                    vels[index + 2 * Nxyz] = 0.05f * (1.0f - t) + 0.05f * t;
+                    // vels[index + 2 * Nxyz] = 0.05f * (1.0f - t) + 0.05f * t;
                 }
                 else if (z == Nz - 1) {
                     // vels[index + 2 * Nxyz] = 0.0f;
@@ -2873,7 +2972,7 @@ private:
             uniformBufferInfo.offset = 0;
             uniformBufferInfo.range = sizeof(SimulateUBO);
 
-            std::array<VkWriteDescriptorSet, 12> descriptorWrites{};
+            std::array<VkWriteDescriptorSet, 13> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = computeDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -3024,6 +3123,19 @@ private:
             descriptorWrites[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[11].descriptorCount = 1;
             descriptorWrites[11].pBufferInfo = &tempForcesBufferInfo;
+
+            VkDescriptorBufferInfo totalForceTorqueBufferInfo{};
+            totalForceTorqueBufferInfo.buffer = totalForceTorqueBuffers[i];
+            totalForceTorqueBufferInfo.offset = 0;
+            totalForceTorqueBufferInfo.range = sizeof(TotalForceTorque);
+
+            descriptorWrites[12].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[12].dstSet = computeDescriptorSets[i];
+            descriptorWrites[12].dstBinding = 12;
+            descriptorWrites[12].dstArrayElement = 0;
+            descriptorWrites[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[12].descriptorCount = 1;
+            descriptorWrites[12].pBufferInfo = &totalForceTorqueBufferInfo;
 
             vkUpdateDescriptorSets(device, descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
         }
@@ -3413,6 +3525,18 @@ private:
                 vkCmdDispatch(commandBuffer, lagrangianPointCount / 256 + 1, 1, 1);
                 vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
             }
+
+            vkCmdFillBuffer(commandBuffer, totalForceTorqueBuffers[currentFrame], 0, sizeof(TotalForceTorque), 0);
+            VkMemoryBarrier fillForceTorqueBarrier{};
+            fillForceTorqueBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            fillForceTorqueBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            fillForceTorqueBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &fillForceTorqueBarrier, 0, nullptr, 0, nullptr);
+
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, forceReductionPipeline);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
+            vkCmdDispatch(commandBuffer, lagrangianPointCount / 256 + 1, 1, 1);
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
         }
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, collideAndStreamPipeline);
@@ -3488,9 +3612,7 @@ private:
             ubo.render_mode = render_mode;
             ubo.model = glm::mat4(1.0f);
             ubo.view = glm::lookAt(cameraPos, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-            //ubo.view = glm::lookAt(glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
             ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 10.0f);
-            //ubo.proj = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 100.0f);
             ubo.proj[1][1] *= -1;
             memcpy(renderingUBOBuffersMapped[currentFrame], &ubo, sizeof(ubo));
         }
@@ -3512,22 +3634,51 @@ private:
             ubo.dt = lastFrameTime / 1000.0f;
             ubo.t = currentTime;
             ubo.render_mode = render_mode;
-
-            float angular_velocity = 0.033f;
-            float current_angle = currentTime * angular_velocity;
+            ubo.lagrangianPointCount = lagrangianPointCount;
 
             glm::mat4 M = glm::mat4(1.0f);
-            glm::vec3 rotation_axis = glm::vec3(0.0f, 0.0f, 1.0f);
-            glm::vec3 object_center = glm::vec3(Nx / 2.0f, Ny / 2.0f, Nz / 2.0f);
-
-            M = glm::translate(M, object_center);
-            M = glm::rotate(M, current_angle, rotation_axis);
-
+            M = glm::translate(M, mySphere.position);
+            M = M * glm::mat4_cast(mySphere.orientation);
             ubo.modelMatrix = M;
 
             memcpy(uniformBuffersMapped[currentFrame], &ubo, sizeof(ubo));
 
             currentTime += 1;
+        }
+    }
+
+    void updateRigidBody(uint32_t currentFrame) {
+        if (!enIBM) return;
+
+        TotalForceTorque result;
+        memcpy(&result, totalForceTorqueBuffersMapped[currentFrame], sizeof(TotalForceTorque));
+
+        float dt = 0.1;
+
+        glm::vec3 gravity(0.0f, 0.0f, -1e-5f * mySphere.mass);
+        glm::vec3 total_force = glm::vec3(result.total_force) + gravity;
+
+        mySphere.linear_velocity += (total_force * mySphere.inv_mass) * dt;
+
+        mySphere.angular_velocity += (mySphere.invInertiaTensor * glm::vec3(result.total_torque)) * dt;
+
+        float damping = 0.999f;
+        mySphere.linear_velocity *= damping;
+        mySphere.angular_velocity *= damping;
+
+        mySphere.position += mySphere.linear_velocity * dt;
+
+        glm::quat delta_q(0.0f, mySphere.angular_velocity.x, mySphere.angular_velocity.y, mySphere.angular_velocity.z);
+        mySphere.orientation += 0.5f * delta_q * mySphere.orientation * dt;
+        mySphere.orientation = glm::normalize(mySphere.orientation);
+
+        float margin = 10.0f;
+        mySphere.position.x = glm::clamp(mySphere.position.x, margin, (float)Nx - margin);
+        mySphere.position.y = glm::clamp(mySphere.position.y, margin, (float)Ny - margin);
+        mySphere.position.z = glm::clamp(mySphere.position.z, margin, (float)Nz - margin);
+
+        if (currentTime % 100 == 0) {
+            std::cout << "currentTime: " << currentTime << " Sphere linear velocity_z: " << mySphere.linear_velocity.z << std::endl;
         }
     }
 
@@ -3537,6 +3688,8 @@ private:
 
         // Compute submission        
         vkWaitForFences(device, 1, &computeInFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+
+        updateRigidBody(currentFrame);
 
         updateUniformBuffer(currentFrame);
 
