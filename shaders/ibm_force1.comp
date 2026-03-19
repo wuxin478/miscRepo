@@ -107,7 +107,12 @@ layout (std430, binding = 0) uniform SimulateUBO {
     uint fixed_point_iteration;
     uint lagrangianPointCount;
     float couplingStrength;
-    mat4 modelMatrix;
+    float mass;
+    float inv_mass;
+    float inertia_scalar;
+    float inv_inertia;
+    float radius;
+    float volume;
 } ubo;
 
 layout(std430, binding = 1) buffer Particles {

@@ -14,6 +14,14 @@ struct LagrangianData {
     vec4 force;
 };
 
+struct RigidBodyState {
+    vec4 position;
+    vec4 orientation;
+    vec4 lin_vel;
+    vec4 ang_vel;
+    mat4 modelMatrix;
+};
+
 layout (std430, binding = 0) uniform SimulateUBO {
     uint Nx;
     uint Ny;
@@ -33,7 +41,12 @@ layout (std430, binding = 0) uniform SimulateUBO {
     uint fixed_point_iteration;
     uint lagrangianPointCount;
     float couplingStrength;
-    mat4 modelMatrix;
+    float mass;
+    float inv_mass;
+    float inertia_scalar;
+    float inv_inertia;
+    float radius;
+    float volume;
 } ubo;
 
 layout(std430, binding = 7) buffer LagrangianPoints {
@@ -52,6 +65,10 @@ layout(std430, binding = 10) buffer LagrangianPointsPrev {
     LagrangianPoint lagrangianPoints_Prev[];
 };
 
+layout(std430, binding = 13) buffer RigidBodyBuffer {
+    RigidBodyState body;
+};
+
 layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
@@ -60,7 +77,7 @@ void main() {
 
     vec4 rest_pos = lagrangianPoints_Rest[k].position;
 
-    vec4 current_world_pos = ubo.modelMatrix * rest_pos;
+    vec4 current_world_pos = body.modelMatrix * rest_pos;
 
     vec3 prev_world_pos = lagrangianPoints_Prev[k].position.xyz;
 

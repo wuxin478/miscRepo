@@ -131,7 +131,20 @@ struct SimulateUBO {
     alignas(4) uint32_t fixed_point_iteration = 0;
     alignas(4) uint32_t lagrangianPointCount = 0;
     alignas(4) float couplingStrength = 0.1f;
-    alignas(16) glm::mat4 modelMatrix = glm::mat4(1.0f);
+    alignas(4) float mass = 1.0f;
+    alignas(4) float inv_mass = 1.0f;
+    alignas(4) float inertia_scalar = 1.0f;
+    alignas(4) float inv_inertia = 1.0f;
+    alignas(4) float radius = 10.0f;
+    alignas(4) float volume = 1.0f;
+};
+
+struct RigidBodyState {
+    alignas(16) glm::vec4 position;
+    alignas(16) glm::vec4 orientation;
+    alignas(16) glm::vec4 lin_vel;
+    alignas(16) glm::vec4 ang_vel;
+    alignas(16) glm::mat4 modelMatrix;
 };
 
 struct RenderingUBO {
@@ -319,6 +332,7 @@ private:
     VkPipeline applyBCPipeline;
     VkPipeline updatePositionsPipeline;
     VkPipeline forceReductionPipeline;
+    VkPipeline rigidBodySolverPipeline;
 
     VkCommandPool commandPool;
 
@@ -349,6 +363,9 @@ private:
     std::vector<VkBuffer> totalForceTorqueBuffers;
     std::vector<VkDeviceMemory> totalForceTorqueBuffersMemory;
     std::vector<void*> totalForceTorqueBuffersMapped;
+
+    std::vector<VkBuffer> rigidBodyStateBuffers;
+    std::vector<VkDeviceMemory> rigidBodyStateBuffersMemory;
 
     RigidBody mySphere;
 
@@ -721,6 +738,7 @@ private:
         vkDestroyPipeline(device, applyBCPipeline, nullptr);
         vkDestroyPipeline(device, updatePositionsPipeline, nullptr);
         vkDestroyPipeline(device, forceReductionPipeline, nullptr);
+        vkDestroyPipeline(device, rigidBodySolverPipeline, nullptr);
 
         vkDestroyRenderPass(device, renderPass, nullptr);
 
@@ -755,6 +773,8 @@ private:
             vkFreeMemory(device, tempForcesBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, totalForceTorqueBuffers[i], nullptr);
             vkFreeMemory(device, totalForceTorqueBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, rigidBodyStateBuffers[i], nullptr);
+            vkFreeMemory(device, rigidBodyStateBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, wireframeBuffers[i], nullptr);
             vkFreeMemory(device, wireframeBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, wireframeIndexBuffers[i], nullptr);
@@ -1136,7 +1156,7 @@ private:
     }
 
     void createComputeDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 13> layoutBindings{};
+        std::array<VkDescriptorSetLayoutBinding, 14> layoutBindings{};
 
         // ubo
         layoutBindings[0].binding = 0;
@@ -1228,6 +1248,13 @@ private:
         layoutBindings[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         layoutBindings[12].pImmutableSamplers = nullptr;
         layoutBindings[12].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // rigidBodyState
+        layoutBindings[13].binding = 13;
+        layoutBindings[13].descriptorCount = 1;
+        layoutBindings[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[13].pImmutableSamplers = nullptr;
+        layoutBindings[13].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -2140,6 +2167,29 @@ private:
         }
 
         {
+            auto computeShaderCode = readFile("shaders/rigid_body_solver_comp.spv");
+
+            VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
+
+            VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
+            computeShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            computeShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            computeShaderStageInfo.module = computeShaderModule;
+            computeShaderStageInfo.pName = "main";
+
+            VkComputePipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+            pipelineInfo.layout = computePipelineLayout;
+            pipelineInfo.stage = computeShaderStageInfo;
+
+            if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &rigidBodySolverPipeline) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create compute pipeline!");
+            }
+
+            vkDestroyShaderModule(device, computeShaderModule, nullptr);
+        }
+
+        {
             auto computeShaderCode = readFile("shaders/calc_comp.spv");
 
             VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
@@ -2556,6 +2606,33 @@ private:
                 createBuffer(totalForceTorqueBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, totalForceTorqueBuffers[i], totalForceTorqueBuffersMemory[i]);
                 copyBuffer(stagingBuffer, totalForceTorqueBuffers[i], totalForceTorqueBufferSize);
                 vkMapMemory(device, totalForceTorqueBuffersMemory[i], 0, totalForceTorqueBufferSize, 0, &totalForceTorqueBuffersMapped[i]);
+            }
+
+            vkDestroyBuffer(device, stagingBuffer, nullptr);
+            vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+            VkDeviceSize rigidBodyStateBufferSize = sizeof(RigidBodyState);
+            rigidBodyStateBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            rigidBodyStateBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+
+            RigidBodyState initialRigidBodyState{};
+            initialRigidBodyState.position = glm::vec4(mySphere.position, 1.0f);
+            initialRigidBodyState.orientation = glm::vec4(mySphere.orientation.x, mySphere.orientation.y, mySphere.orientation.z, mySphere.orientation.w);
+            initialRigidBodyState.lin_vel = glm::vec4(mySphere.linear_velocity, 0.0f);
+            initialRigidBodyState.ang_vel = glm::vec4(mySphere.angular_velocity, 0.0f);
+            glm::mat4 M = glm::mat4(1.0f);
+            M = glm::translate(M, mySphere.position);
+            M = M * glm::mat4_cast(mySphere.orientation);
+            initialRigidBodyState.modelMatrix = M;
+
+            createBuffer(rigidBodyStateBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+            vkMapMemory(device, stagingBufferMemory, 0, rigidBodyStateBufferSize, 0, &data);
+            memcpy(data, &initialRigidBodyState, (size_t)rigidBodyStateBufferSize);
+            vkUnmapMemory(device, stagingBufferMemory);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                createBuffer(rigidBodyStateBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, rigidBodyStateBuffers[i], rigidBodyStateBuffersMemory[i]);
+                copyBuffer(stagingBuffer, rigidBodyStateBuffers[i], rigidBodyStateBufferSize);
             }
 
             vkDestroyBuffer(device, stagingBuffer, nullptr);
@@ -2977,7 +3054,7 @@ private:
             uniformBufferInfo.offset = 0;
             uniformBufferInfo.range = sizeof(SimulateUBO);
 
-            std::array<VkWriteDescriptorSet, 13> descriptorWrites{};
+            std::array<VkWriteDescriptorSet, 14> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = computeDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -3141,6 +3218,19 @@ private:
             descriptorWrites[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[12].descriptorCount = 1;
             descriptorWrites[12].pBufferInfo = &totalForceTorqueBufferInfo;
+
+            VkDescriptorBufferInfo rigidBodyStateBufferInfo{};
+            rigidBodyStateBufferInfo.buffer = rigidBodyStateBuffers[i];
+            rigidBodyStateBufferInfo.offset = 0;
+            rigidBodyStateBufferInfo.range = sizeof(RigidBodyState);
+
+            descriptorWrites[13].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[13].dstSet = computeDescriptorSets[i];
+            descriptorWrites[13].dstBinding = 13;
+            descriptorWrites[13].dstArrayElement = 0;
+            descriptorWrites[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[13].descriptorCount = 1;
+            descriptorWrites[13].pBufferInfo = &rigidBodyStateBufferInfo;
 
             vkUpdateDescriptorSets(device, descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
         }
@@ -3484,6 +3574,11 @@ private:
         vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &fillmemorybarrier, 0, nullptr, 0, nullptr);
 
         if (enIBM) {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, rigidBodySolverPipeline);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
+            vkCmdDispatch(commandBuffer, 1, 1, 1);
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
+
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, updatePositionsPipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
             vkCmdDispatch(commandBuffer, lagrangianPointCount / 256 + 1, 1, 1);
@@ -3641,64 +3736,16 @@ private:
             ubo.render_mode = render_mode;
             ubo.lagrangianPointCount = lagrangianPointCount;
             ubo.couplingStrength = couplingStrength;
-
-            glm::mat4 M = glm::mat4(1.0f);
-            M = glm::translate(M, mySphere.position);
-            M = M * glm::mat4_cast(mySphere.orientation);
-            ubo.modelMatrix = M;
+            ubo.mass = mySphere.mass;
+            ubo.inv_mass = mySphere.inv_mass;
+            ubo.inertia_scalar = mySphere.inertiaTensor[0][0];
+            ubo.inv_inertia = mySphere.invInertiaTensor[0][0];
+            ubo.radius = mySphere.radius;
+            ubo.volume = mySphere.volume;
 
             memcpy(uniformBuffersMapped[currentFrame], &ubo, sizeof(ubo));
 
             currentTime += 1;
-        }
-    }
-
-    void updateRigidBody(uint32_t currentFrame) {
-        if (!enIBM) return;
-
-        TotalForceTorque result;
-        memcpy(&result, totalForceTorqueBuffersMapped[currentFrame], sizeof(TotalForceTorque));
-
-        float dt = 1.0;
-
-        float force_rescale = 1.0f / couplingStrength;
-
-        glm::vec3 fluid_force = glm::vec3(result.total_force) * force_rescale;
-        glm::vec3 fluid_torque = glm::vec3(result.total_torque) * force_rescale;
-
-        glm::vec3 gravity_force (0.0f, 0.0f, -0.001f * mySphere.mass);
-        glm::vec3 buoyancy_force(0.0f, 0.0f,  0.001f * mySphere.volume);
-        glm::vec3 total_force = fluid_force + gravity_force + buoyancy_force;
-
-        mySphere.linear_velocity += (total_force * mySphere.inv_mass) * dt;
-
-        mySphere.angular_velocity += (mySphere.invInertiaTensor * fluid_torque) * dt;
-        
-        const float max_vel = 0.4f;
-        if (glm::length(mySphere.linear_velocity) > max_vel) {
-            mySphere.linear_velocity = glm::normalize(mySphere.linear_velocity) * max_vel;
-        }
-        if (glm::length(mySphere.angular_velocity) > max_vel) {
-            mySphere.angular_velocity = glm::normalize(mySphere.angular_velocity) * max_vel;
-        }
-
-        float damping = 0.999f;
-        mySphere.linear_velocity *= damping;
-        mySphere.angular_velocity *= damping;
-
-        mySphere.position += mySphere.linear_velocity * dt;
-
-        glm::quat delta_q(0.0f, mySphere.angular_velocity.x, mySphere.angular_velocity.y, mySphere.angular_velocity.z);
-        mySphere.orientation += 0.5f * delta_q * mySphere.orientation * dt;
-        mySphere.orientation = glm::normalize(mySphere.orientation);
-
-        float margin = 10.0f;
-        mySphere.position.x = glm::clamp(mySphere.position.x, margin, (float)Nx - margin);
-        mySphere.position.y = glm::clamp(mySphere.position.y, margin, (float)Ny - margin);
-        mySphere.position.z = glm::clamp(mySphere.position.z, margin, (float)Nz - margin);
-
-        if (currentTime % 100 == 0) {
-            std::cout << "currentTime: " << currentTime << " Sphere linear velocity_z: " << mySphere.linear_velocity.z << std::endl;
         }
     }
 
@@ -3708,8 +3755,6 @@ private:
 
         // Compute submission        
         vkWaitForFences(device, 1, &computeInFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
-
-        updateRigidBody(currentFrame);
 
         updateUniformBuffer(currentFrame);
 
