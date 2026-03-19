@@ -55,7 +55,7 @@ const uint32_t Q = 19;
 
 const int MAX_FRAMES_IN_FLIGHT = 1;
 
-const uint32_t lagrangianPointCount = 4096;
+const uint32_t lagrangianPointCount = 10000;
 
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation",
@@ -2309,7 +2309,7 @@ private:
             float centerX = Nx / 2.0f;
             float centerY = Ny / 2.0f;
             float centerZ = Nz / 2.0f;
-            float radius = 10.0f;
+            float radius = 15.0f;
 
             // Generate sphere point cloud using Fibonacci lattice
             for (uint32_t i = 0; i < lagrangianPointCount; i++) {
