@@ -130,6 +130,7 @@ struct SimulateUBO {
     alignas(4) uint32_t render_mode = 0;
     alignas(4) uint32_t fixed_point_iteration = 0;
     alignas(4) uint32_t lagrangianPointCount = 0;
+    alignas(4) float couplingStrength = 0.1f;
     alignas(16) glm::mat4 modelMatrix = glm::mat4(1.0f);
 };
 
@@ -220,6 +221,7 @@ struct TotalForceTorque {
 struct RigidBody {
     float rho;
     float radius;
+    float volume;
     float mass;
     float inv_mass;
     glm::mat3 inertiaTensor;
@@ -230,17 +232,18 @@ struct RigidBody {
     glm::vec3 angular_velocity;
 
     RigidBody() {
-        rho = 1.2f;
-        radius = 8.0f;
-        mass = rho * radius * radius * radius * 3.1415926f * 4.0f / 3.0f;
+        rho = 1.0f;
+        radius = 10.0f;
+        volume = radius * radius * radius * 3.1415926f * 4.0f / 3.0f;
+        mass = rho * volume;
         inv_mass = 1.0f / mass;
         float I = 0.4f * mass * radius * radius;
         inertiaTensor = glm::mat3(I);
         invInertiaTensor = glm::mat3(1.0f / I);
-        position = glm::vec3(Nx / 2.0f, Ny / 2.0f, Nz * 3.0f / 4.0f);
+        position = glm::vec3(Nx / 2.0f, Ny / 2.0f, Nz / 2.0f);
         orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
         linear_velocity = glm::vec3(0.0f);
-        angular_velocity = glm::vec3(0.0f, 0.0f, 0.02f);
+        angular_velocity = glm::vec3(0.0f, 0.0f, 0.05f);
     }
 };
 
@@ -263,8 +266,9 @@ private:
     bool framebufferResized = false;
     bool isInit = false;
     uint32_t currentTime = 0;
-    int render_mode = 1;
+    int render_mode = 2;
     bool enIBM = true;
+    float couplingStrength = 1.0f;
 
     VkInstance instance;
     VkDebugUtilsMessengerEXT debugMessenger;
@@ -661,6 +665,7 @@ private:
                 const char* render_modes[] = { "Normal Particles", "Diagnostic Particles", "Velocity Field" };
                 ImGui::Combo("Render Mode", &render_mode, render_modes, IM_ARRAYSIZE(render_modes));
                 ImGui::Checkbox("Enable IBM?", &enIBM);
+                ImGui::SliderFloat("Coupling Strength", &couplingStrength, 0.1f, 1.0f, "%.2f");
                 ImGui::Text("FPS: %.1f", 1000.0f / lastFrameTime);
                 ImGui::Text("Particles: %d", particle_count);
                 ImGui::End();
@@ -3635,6 +3640,7 @@ private:
             ubo.t = currentTime;
             ubo.render_mode = render_mode;
             ubo.lagrangianPointCount = lagrangianPointCount;
+            ubo.couplingStrength = couplingStrength;
 
             glm::mat4 M = glm::mat4(1.0f);
             M = glm::translate(M, mySphere.position);
@@ -3653,14 +3659,28 @@ private:
         TotalForceTorque result;
         memcpy(&result, totalForceTorqueBuffersMapped[currentFrame], sizeof(TotalForceTorque));
 
-        float dt = 0.1;
+        float dt = 1.0;
 
-        glm::vec3 gravity(0.0f, 0.0f, -1e-5f * mySphere.mass);
-        glm::vec3 total_force = glm::vec3(result.total_force) + gravity;
+        float force_rescale = 1.0f / couplingStrength;
+
+        glm::vec3 fluid_force = glm::vec3(result.total_force) * force_rescale;
+        glm::vec3 fluid_torque = glm::vec3(result.total_torque) * force_rescale;
+
+        glm::vec3 gravity_force (0.0f, 0.0f, -0.001f * mySphere.mass);
+        glm::vec3 buoyancy_force(0.0f, 0.0f,  0.001f * mySphere.volume);
+        glm::vec3 total_force = fluid_force + gravity_force + buoyancy_force;
 
         mySphere.linear_velocity += (total_force * mySphere.inv_mass) * dt;
 
-        mySphere.angular_velocity += (mySphere.invInertiaTensor * glm::vec3(result.total_torque)) * dt;
+        mySphere.angular_velocity += (mySphere.invInertiaTensor * fluid_torque) * dt;
+        
+        const float max_vel = 0.4f;
+        if (glm::length(mySphere.linear_velocity) > max_vel) {
+            mySphere.linear_velocity = glm::normalize(mySphere.linear_velocity) * max_vel;
+        }
+        if (glm::length(mySphere.angular_velocity) > max_vel) {
+            mySphere.angular_velocity = glm::normalize(mySphere.angular_velocity) * max_vel;
+        }
 
         float damping = 0.999f;
         mySphere.linear_velocity *= damping;
