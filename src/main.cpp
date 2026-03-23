@@ -288,6 +288,7 @@ private:
     bool isManualControl = false;
     float manualLinVel[3] = { 0.0f, 0.0f, 0.0f };
     float manualAngVel[3] = { 0.0f, 0.0f, 0.0f };
+    float rigidBodyDensity = 1.0f;
 
     VkInstance instance;
     VkDebugUtilsMessengerEXT debugMessenger;
@@ -717,6 +718,16 @@ private:
                 } else {
                     ImGui::Text("Mode: Bi-directional Physics");
                 }
+                ImGui::Separator();
+                if (ImGui::SliderFloat("Density", &rigidBodyDensity, 0.1f, 2.0f, "%.2f")) {
+                    mySphere.rho = rigidBodyDensity;
+                    mySphere.mass = mySphere.rho * mySphere.volume;
+                    mySphere.inv_mass = 1.0f / mySphere.mass;
+                    float I = 0.4f * mySphere.mass * mySphere.radius * mySphere.radius;
+                    mySphere.inertiaTensor = glm::mat3(I);
+                    mySphere.invInertiaTensor = glm::mat3(1.0f / I);
+                }
+                ImGui::Text("Mass: %.2f", mySphere.mass);
                 ImGui::End();
             }
             
