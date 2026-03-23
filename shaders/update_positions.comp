@@ -47,6 +47,9 @@ layout (std430, binding = 0) uniform SimulateUBO {
     float inv_inertia;
     float radius;
     float volume;
+    uint manualMode;
+    vec4 manualLinVel;
+    vec4 manualAngVel;
 } ubo;
 
 layout(std430, binding = 7) buffer LagrangianPoints {

@@ -137,6 +137,9 @@ struct SimulateUBO {
     alignas(4) float inv_inertia = 1.0f;
     alignas(4) float radius = 10.0f;
     alignas(4) float volume = 1.0f;
+    alignas(4) uint32_t manualMode = 0;
+    alignas(16) glm::vec4 manualLinVel = glm::vec4(0.0f);
+    alignas(16) glm::vec4 manualAngVel = glm::vec4(0.0f);
 };
 
 struct RigidBodyState {
@@ -282,6 +285,9 @@ private:
     int render_mode = 2;
     bool enIBM = true;
     float couplingStrength = 1.0f;
+    bool isManualControl = false;
+    float manualLinVel[3] = { 0.0f, 0.0f, 0.0f };
+    float manualAngVel[3] = { 0.0f, 0.0f, 0.0f };
 
     VkInstance instance;
     VkDebugUtilsMessengerEXT debugMessenger;
@@ -685,6 +691,32 @@ private:
                 ImGui::SliderFloat("Coupling Strength", &couplingStrength, 0.1f, 1.0f, "%.2f");
                 ImGui::Text("FPS: %.1f", 1000.0f / lastFrameTime);
                 ImGui::Text("Particles: %d", particle_count);
+                ImGui::End();
+            }
+            
+            {
+                ImGui::Begin("Rigid Body Control");
+                if (ImGui::Checkbox("Enable Manual Control", &isManualControl)) {
+                    manualLinVel[0] = manualLinVel[1] = manualLinVel[2] = 0.0f;
+                    manualAngVel[0] = manualAngVel[1] = manualAngVel[2] = 0.0f;
+                }
+                ImGui::Separator();
+                if (isManualControl) {
+                    ImGui::Text("Manual Velocity Control");
+                    ImGui::SliderFloat("vx", &manualLinVel[0], -0.05f, 0.05f);
+                    ImGui::SliderFloat("vy", &manualLinVel[1], -0.05f, 0.05f);
+                    ImGui::SliderFloat("vz", &manualLinVel[2], -0.05f, 0.05f);
+                    ImGui::Separator();
+                    ImGui::SliderFloat("rva", &manualAngVel[0], -0.02f, 0.02f);
+                    ImGui::SliderFloat("rvb", &manualAngVel[1], -0.02f, 0.02f);
+                    ImGui::SliderFloat("rvc", &manualAngVel[2], -0.02f, 0.02f);
+                    if (ImGui::Button("Stop All")) {
+                        manualLinVel[0] = manualLinVel[1] = manualLinVel[2] = 0.0f;
+                        manualAngVel[0] = manualAngVel[1] = manualAngVel[2] = 0.0f;
+                    }
+                } else {
+                    ImGui::Text("Mode: Bi-directional Physics");
+                }
                 ImGui::End();
             }
             
@@ -3780,6 +3812,9 @@ private:
             ubo.inv_inertia = mySphere.invInertiaTensor[0][0];
             ubo.radius = mySphere.radius;
             ubo.volume = mySphere.volume;
+            ubo.manualMode = isManualControl ? 1 : 0;
+            ubo.manualLinVel = glm::vec4(manualLinVel[0], manualLinVel[1], manualLinVel[2], 0.0f);
+            ubo.manualAngVel = glm::vec4(manualAngVel[0], manualAngVel[1], manualAngVel[2], 0.0f);
 
             memcpy(uniformBuffersMapped[currentFrame], &ubo, sizeof(ubo));
 

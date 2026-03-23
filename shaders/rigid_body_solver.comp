@@ -34,6 +34,9 @@ layout (std430, binding = 0) uniform SimulateUBO {
     float inv_inertia;
     float radius;
     float volume;
+    uint manualMode;
+    vec4 manualLinVel;
+    vec4 manualAngVel;
 } ubo;
 
 layout(std430, binding = 12) buffer TotalForceTorqueBuffer {
@@ -60,20 +63,25 @@ mat4 build_model_matrix(vec3 pos, vec4 q) {
 }
 
 void main() {
-    vec3 F_fluid = total_force.xyz * (1.0 / ubo.couplingStrength);
-    vec3 T_fluid = total_torque.xyz * (1.0 / ubo.couplingStrength);
-
     float dt = 1.0;
 
-    vec3 gravity_force = vec3(0.0, 0.0, -0.001 * ubo.mass);
-    vec3 buoyancy_force = vec3(0.0, 0.0, 0.001 * ubo.volume);
-    vec3 total_force_vec = F_fluid + gravity_force + buoyancy_force;
+    if (ubo.manualMode == 1) {
+        body.lin_vel.xyz = ubo.manualLinVel.xyz;
+        body.ang_vel.xyz = ubo.manualAngVel.xyz;
+    } else {
+        vec3 F_fluid = total_force.xyz * (1.0 / ubo.couplingStrength);
+        vec3 T_fluid = total_torque.xyz * (1.0 / ubo.couplingStrength);
 
-    vec3 acc = total_force_vec * ubo.inv_mass;
-    body.lin_vel.xyz = (body.lin_vel.xyz + acc * dt) * 0.999;
+        vec3 gravity_force = vec3(0.0, 0.0, -0.001 * ubo.mass);
+        vec3 buoyancy_force = vec3(0.0, 0.0, 0.001 * ubo.volume);
+        vec3 total_force_vec = F_fluid + gravity_force + buoyancy_force;
 
-    vec3 ang_acc = T_fluid * ubo.inv_inertia;
-    body.ang_vel.xyz = (body.ang_vel.xyz + ang_acc * dt) * 0.999;
+        vec3 acc = total_force_vec * ubo.inv_mass;
+        body.lin_vel.xyz = (body.lin_vel.xyz + acc * dt) * 0.999;
+
+        vec3 ang_acc = T_fluid * ubo.inv_inertia;
+        body.ang_vel.xyz = (body.ang_vel.xyz + ang_acc * dt) * 0.999;
+    }
 
     float max_vel = 0.4;
     float lin_vel_len = length(body.lin_vel.xyz);
