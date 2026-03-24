@@ -1,5 +1,8 @@
+#define NOMINMAX
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+
+constexpr float PI = 3.14159265358979323846f;
 
 #include <ktx.h>
 #include <ktxvulkan.h>
@@ -58,7 +61,7 @@ const uint32_t Q = 19;
 
 const int MAX_FRAMES_IN_FLIGHT = 1;
 
-const uint32_t lagrangianPointCount = 10000;
+uint32_t lagrangianPointCount = 0;
 
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation",
@@ -238,9 +241,107 @@ struct TotalForceTorque {
     alignas(16) glm::vec4 total_torque;
 };
 
+enum class RigidBodyShape {
+    SPHERE,
+    BOX,
+    CYLINDER
+};
+
+void generateSphere(float R, float target_spacing,
+                    std::vector<glm::vec3>& positions, std::vector<float>& sk_buffer) {
+    float total_area = 4.0f * PI * R * R;
+    int N = (std::max)(10, (int)std::round(total_area / (target_spacing * target_spacing)));
+    
+    float sk = total_area / N;
+    
+    const float goldenRatio = (1.0f + std::sqrt(5.0f)) / 2.0f;
+    const float angleIncrement = 2.0f * PI * goldenRatio;
+
+    for (int i = 0; i < N; ++i) {
+        float y = 1.0f - (i * 2.0f) / (N - 1);
+        float radiusAtY = std::sqrt(1.0f - y * y);
+        float theta = angleIncrement * i;
+
+        float x = std::cos(theta) * radiusAtY;
+        float z = std::sin(theta) * radiusAtY;
+
+        positions.push_back(glm::vec3(x * R, y * R, z * R));
+        sk_buffer.push_back(sk);
+    }
+}
+
+void generateBox(glm::vec3 size, float target_spacing,
+                 std::vector<glm::vec3>& positions, std::vector<float>& sk_buffer) {
+    auto generateFace = [&](glm::vec3 center, glm::vec3 right, glm::vec3 up, float w, float h) {
+        int nx = (std::max)(1, (int)std::round(w / target_spacing));
+        int ny = (std::max)(1, (int)std::round(h / target_spacing));
+        
+        float sk = (w * h) / (nx * ny);
+        float dx = w / nx;
+        float dy = h / ny;
+        
+        for (int i = 0; i < nx; ++i) {
+            for (int j = 0; j < ny; ++j) {
+                float u = -w/2.0f + (i + 0.5f) * dx;
+                float v = -h/2.0f + (j + 0.5f) * dy;
+                positions.push_back(center + right * u + up * v);
+                sk_buffer.push_back(sk);
+            }
+        }
+    };
+
+    float W = size.x, H = size.y, D = size.z;
+    generateFace(glm::vec3(0, 0,  D/2), glm::vec3(1,0,0), glm::vec3(0,1,0), W, H);
+    generateFace(glm::vec3(0, 0, -D/2), glm::vec3(1,0,0), glm::vec3(0,1,0), W, H);
+    generateFace(glm::vec3(0,  H/2, 0), glm::vec3(1,0,0), glm::vec3(0,0,1), W, D);
+    generateFace(glm::vec3(0, -H/2, 0), glm::vec3(1,0,0), glm::vec3(0,0,1), W, D);
+    generateFace(glm::vec3(  W/2, 0, 0), glm::vec3(0,1,0), glm::vec3(0,0,1), H, D);
+    generateFace(glm::vec3( -W/2, 0, 0), glm::vec3(0,1,0), glm::vec3(0,0,1), H, D);
+}
+
+void generateCylinder(float R, float H, float target_spacing,
+                      std::vector<glm::vec3>& positions, std::vector<float>& sk_buffer) {
+    float side_area = 2.0f * PI * R * H;
+    int nz = (std::max)(1, (int)std::round(H / target_spacing));
+    int n_circ = (std::max)(6, (int)std::round((2.0f * PI * R) / target_spacing));
+    float sk_side = side_area / (nz * n_circ);
+    
+    for (int i = 0; i < nz; ++i) {
+        float z = -H/2.0f + (i + 0.5f) * (H / nz);
+        for (int j = 0; j < n_circ; ++j) {
+            float theta = j * (2.0f * PI / n_circ);
+            positions.push_back(glm::vec3(R * std::cos(theta), R * std::sin(theta), z));
+            sk_buffer.push_back(sk_side);
+        }
+    }
+
+    auto generateCap = [&](float z_offset) {
+        float cap_area = PI * R * R;
+        int n_cap = (std::max)(1, (int)std::round(cap_area / (target_spacing * target_spacing)));
+        float sk_cap = cap_area / n_cap;
+        
+        const float goldenRatio = (1.0f + std::sqrt(5.0f)) / 2.0f;
+        
+        for (int i = 0; i < n_cap; ++i) {
+            float r = R * std::sqrt((i + 0.5f) / n_cap);
+            float theta = 2.0f * PI * goldenRatio * i;
+            
+            positions.push_back(glm::vec3(r * std::cos(theta), r * std::sin(theta), z_offset));
+            sk_buffer.push_back(sk_cap);
+        }
+    };
+
+    generateCap( H/2.0f);
+    generateCap(-H/2.0f);
+}
+
 struct RigidBody {
+    RigidBodyShape shape = RigidBodyShape::SPHERE;
     float rho;
     float radius;
+    glm::vec3 boxSize;
+    float cylinderRadius;
+    float cylinderHeight;
     float volume;
     float mass;
     float inv_mass;
@@ -252,18 +353,55 @@ struct RigidBody {
     glm::vec3 angular_velocity;
 
     RigidBody() {
+        shape = RigidBodyShape::SPHERE;
         rho = 1.0f;
         radius = 10.0f;
-        volume = radius * radius * radius * 3.1415926f * 4.0f / 3.0f;
-        mass = rho * volume;
-        inv_mass = 1.0f / mass;
-        float I = 0.4f * mass * radius * radius;
-        inertiaTensor = glm::mat3(I);
-        invInertiaTensor = glm::mat3(1.0f / I);
+        boxSize = glm::vec3(20.0f, 20.0f, 20.0f);
+        cylinderRadius = 10.0f;
+        cylinderHeight = 20.0f;
+        updateInertia();
         position = glm::vec3(Nx / 2.0f, Ny / 2.0f, Nz / 2.0f);
         orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
         linear_velocity = glm::vec3(0.0f);
         angular_velocity = glm::vec3(0.0f, 0.0f, 0.05f);
+    }
+
+    void updateInertia() {
+        switch (shape) {
+            case RigidBodyShape::SPHERE:
+                volume = 4.0f / 3.0f * PI * radius * radius * radius;
+                mass = rho * volume;
+                inv_mass = 1.0f / mass;
+                {
+                    float I = 0.4f * mass * radius * radius;
+                    inertiaTensor = glm::mat3(I);
+                    invInertiaTensor = glm::mat3(1.0f / I);
+                }
+                break;
+            case RigidBodyShape::BOX:
+                volume = boxSize.x * boxSize.y * boxSize.z;
+                mass = rho * volume;
+                inv_mass = 1.0f / mass;
+                {
+                    float Ix = mass * (boxSize.y * boxSize.y + boxSize.z * boxSize.z) / 12.0f;
+                    float Iy = mass * (boxSize.x * boxSize.x + boxSize.z * boxSize.z) / 12.0f;
+                    float Iz = mass * (boxSize.x * boxSize.x + boxSize.y * boxSize.y) / 12.0f;
+                    inertiaTensor = glm::mat3(Ix, 0, 0, 0, Iy, 0, 0, 0, Iz);
+                    invInertiaTensor = glm::mat3(1.0f/Ix, 0, 0, 0, 1.0f/Iy, 0, 0, 0, 1.0f/Iz);
+                }
+                break;
+            case RigidBodyShape::CYLINDER:
+                volume = PI * cylinderRadius * cylinderRadius * cylinderHeight;
+                mass = rho * volume;
+                inv_mass = 1.0f / mass;
+                {
+                    float I_axis = 0.5f * mass * cylinderRadius * cylinderRadius;
+                    float I_perp = mass * (3.0f * cylinderRadius * cylinderRadius + cylinderHeight * cylinderHeight) / 12.0f;
+                    inertiaTensor = glm::mat3(I_perp, 0, 0, 0, I_perp, 0, 0, 0, I_axis);
+                    invInertiaTensor = glm::mat3(1.0f/I_perp, 0, 0, 0, 1.0f/I_perp, 0, 0, 0, 1.0f/I_axis);
+                }
+                break;
+        }
     }
 };
 
@@ -2594,27 +2732,36 @@ private:
             vkFreeMemory(device, stagingBufferMemory, nullptr);
         }
 
-        // Lagrangian Points - generate sphere point cloud
+        // Lagrangian Points - generate based on shape
         {
+            std::vector<glm::vec3> positions;
+            std::vector<float> skValues;
+            
+            float target_spacing = 0.5f;
+            
+            switch (mySphere.shape) {
+                case RigidBodyShape::SPHERE:
+                    generateSphere(mySphere.radius, target_spacing, positions, skValues);
+                    break;
+                case RigidBodyShape::BOX:
+                    generateBox(mySphere.boxSize, target_spacing, positions, skValues);
+                    break;
+                case RigidBodyShape::CYLINDER:
+                    generateCylinder(mySphere.cylinderRadius, mySphere.cylinderHeight, target_spacing, positions, skValues);
+                    break;
+            }
+            
+            lagrangianPointCount = static_cast<uint32_t>(positions.size());
+            
             std::vector<LagrangianPoint> lagrangianPointsRest(lagrangianPointCount);
             std::vector<LagrangianData> lagrangianData(lagrangianPointCount);
 
-            float radius = mySphere.radius;
-
             for (uint32_t i = 0; i < lagrangianPointCount; i++) {
-                float y = 1.0f - (i / float(lagrangianPointCount - 1)) * 2.0f;
-                float radiusAtY = sqrt(1.0f - y * y);
-                float theta = i * 2.4f;
-
-                float x = cos(theta) * radiusAtY;
-                float z = sin(theta) * radiusAtY;
-
-                lagrangianPointsRest[i].position = glm::vec4(x * radius, y * radius, z * radius, 1.0f);
-
+                lagrangianPointsRest[i].position = glm::vec4(positions[i], 1.0f);
                 lagrangianData[i].velocity = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
                 lagrangianData[i].force = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
             }
-
+            
             VkDeviceSize pointsBufferSize = sizeof(LagrangianPoint) * lagrangianPointCount;
             VkDeviceSize dataBufferSize = sizeof(LagrangianData) * lagrangianPointCount;
 
@@ -2692,11 +2839,6 @@ private:
             }
 
             VkDeviceSize skBufferSize = sizeof(float) * lagrangianPointCount;
-            std::vector<float> skValues(lagrangianPointCount);
-            float skUniform = (4.0f * 3.1415926f * (radius * radius)) / lagrangianPointCount;
-            for (uint32_t i = 0; i < lagrangianPointCount; i++) {
-                skValues[i] = skUniform;
-            }
 
             skBuffers.resize(MAX_FRAMES_IN_FLIGHT);
             skBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
