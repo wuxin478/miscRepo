@@ -158,6 +158,10 @@ layout(std430, binding = 11) buffer TempForce {
     vec4 tempForces[];
 };
 
+layout(std430, binding = 14) buffer SkBuffer {
+    float s_k_values[];
+};
+
 layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 uint index_f(uint n, uint i) {
@@ -380,8 +384,8 @@ void main()
     }
     
     // 论文公式: Δu(k) ← Δu(k) + (uk - u_iter(k))*s(k)
-    // s(k) 是点的代表面积，我们先简化为 1.0
-    float s_k = (4.0f * 3.1415926f * (ubo.radius * ubo.radius)) / ubo.lagrangianPointCount;
+    // s(k) 是点的代表面积，从buffer读取
+    float s_k = s_k_values[k];
     lagrangianData[k].force.xyz += g_k * s_k;
 
     // 存储中间结果 g(k) 到临时 Buffer

@@ -375,6 +375,9 @@ private:
     std::vector<VkBuffer> tempForcesBuffers;
     std::vector<VkDeviceMemory> tempForcesBuffersMemory;
 
+    std::vector<VkBuffer> skBuffers;
+    std::vector<VkDeviceMemory> skBuffersMemory;
+
     std::vector<VkBuffer> totalForceTorqueBuffers;
     std::vector<VkDeviceMemory> totalForceTorqueBuffersMemory;
     std::vector<void*> totalForceTorqueBuffersMapped;
@@ -829,6 +832,8 @@ private:
             vkFreeMemory(device, lagrangianDataBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, tempForcesBuffers[i], nullptr);
             vkFreeMemory(device, tempForcesBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, skBuffers[i], nullptr);
+            vkFreeMemory(device, skBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, totalForceTorqueBuffers[i], nullptr);
             vkFreeMemory(device, totalForceTorqueBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, rigidBodyStateBuffers[i], nullptr);
@@ -1217,7 +1222,7 @@ private:
     }
 
     void createComputeDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 14> layoutBindings{};
+        std::array<VkDescriptorSetLayoutBinding, 15> layoutBindings{};
 
         // ubo
         layoutBindings[0].binding = 0;
@@ -1316,6 +1321,13 @@ private:
         layoutBindings[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         layoutBindings[13].pImmutableSamplers = nullptr;
         layoutBindings[13].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // s_k buffer
+        layoutBindings[14].binding = 14;
+        layoutBindings[14].descriptorCount = 1;
+        layoutBindings[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[14].pImmutableSamplers = nullptr;
+        layoutBindings[14].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -2679,6 +2691,29 @@ private:
                 createBuffer(tempForceBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tempForcesBuffers[i], tempForcesBuffersMemory[i]);
             }
 
+            VkDeviceSize skBufferSize = sizeof(float) * lagrangianPointCount;
+            std::vector<float> skValues(lagrangianPointCount);
+            float skUniform = (4.0f * 3.1415926f * (radius * radius)) / lagrangianPointCount;
+            for (uint32_t i = 0; i < lagrangianPointCount; i++) {
+                skValues[i] = skUniform;
+            }
+
+            skBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            skBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+
+            createBuffer(skBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+            vkMapMemory(device, stagingBufferMemory, 0, skBufferSize, 0, &data);
+            memcpy(data, skValues.data(), (size_t)skBufferSize);
+            vkUnmapMemory(device, stagingBufferMemory);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                createBuffer(skBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, skBuffers[i], skBuffersMemory[i]);
+                copyBuffer(stagingBuffer, skBuffers[i], skBufferSize);
+            }
+
+            vkDestroyBuffer(device, stagingBuffer, nullptr);
+            vkFreeMemory(device, stagingBufferMemory, nullptr);
+
             VkDeviceSize totalForceTorqueBufferSize = sizeof(TotalForceTorque);
             totalForceTorqueBuffers.resize(MAX_FRAMES_IN_FLIGHT);
             totalForceTorqueBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
@@ -3144,7 +3179,7 @@ private:
             uniformBufferInfo.offset = 0;
             uniformBufferInfo.range = sizeof(SimulateUBO);
 
-            std::array<VkWriteDescriptorSet, 14> descriptorWrites{};
+            std::array<VkWriteDescriptorSet, 15> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = computeDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -3321,6 +3356,19 @@ private:
             descriptorWrites[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[13].descriptorCount = 1;
             descriptorWrites[13].pBufferInfo = &rigidBodyStateBufferInfo;
+
+            VkDescriptorBufferInfo skBufferInfo{};
+            skBufferInfo.buffer = skBuffers[i];
+            skBufferInfo.offset = 0;
+            skBufferInfo.range = sizeof(float) * lagrangianPointCount;
+
+            descriptorWrites[14].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[14].dstSet = computeDescriptorSets[i];
+            descriptorWrites[14].dstBinding = 14;
+            descriptorWrites[14].dstArrayElement = 0;
+            descriptorWrites[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[14].descriptorCount = 1;
+            descriptorWrites[14].pBufferInfo = &skBufferInfo;
 
             vkUpdateDescriptorSets(device, descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
         }
