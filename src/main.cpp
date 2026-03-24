@@ -58,7 +58,7 @@ const uint32_t Q = 19;
 
 const int MAX_FRAMES_IN_FLIGHT = 1;
 
-const uint32_t lagrangianPointCount = 4096;
+const uint32_t lagrangianPointCount = 10000;
 
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation",
@@ -140,6 +140,10 @@ struct SimulateUBO {
     alignas(4) uint32_t manualMode = 0;
     alignas(16) glm::vec4 manualLinVel = glm::vec4(0.0f);
     alignas(16) glm::vec4 manualAngVel = glm::vec4(0.0f);
+    alignas(4) uint32_t useEmitter = 0;
+    alignas(4) float spawnRate = 10.0f;
+    alignas(16) glm::vec4 emitterPos = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    alignas(16) glm::vec4 emitterVel = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
 };
 
 struct RigidBodyState {
@@ -282,13 +286,17 @@ private:
     bool framebufferResized = false;
     bool isInit = false;
     uint32_t currentTime = 0;
-    int render_mode = 2;
+    int render_mode = 1;
     bool enIBM = true;
     float couplingStrength = 1.0f;
-    bool isManualControl = false;
+    bool isManualControl = true;
     float manualLinVel[3] = { 0.0f, 0.0f, 0.0f };
     float manualAngVel[3] = { 0.0f, 0.0f, 0.0f };
     float rigidBodyDensity = 1.0f;
+    uint32_t useEmitter = 1;
+    float spawnRate = 5000.0f;
+    float emitterPos[4] = { Nx / 2.0f, Ny / 2.0f, 2.0f, 1.0f };
+    float emitterVel[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 
     VkInstance instance;
     VkDebugUtilsMessengerEXT debugMessenger;
@@ -690,6 +698,13 @@ private:
                 ImGui::Combo("Render Mode", &render_mode, render_modes, IM_ARRAYSIZE(render_modes));
                 ImGui::Checkbox("Enable IBM?", &enIBM);
                 ImGui::SliderFloat("Coupling Strength", &couplingStrength, 0.1f, 1.0f, "%.2f");
+                ImGui::Separator();
+                ImGui::Text("Emitter Settings");
+                ImGui::Checkbox("Use Emitter Mode", (bool*)&useEmitter);
+                if (useEmitter) {
+                    ImGui::SliderFloat("Spawn Rate", &spawnRate, 100.0f, 5000.0f, "%.1f");
+                    ImGui::SliderFloat4("Emitter Pos", emitterPos, 0.0f, 128.0f);
+                }
                 ImGui::Text("FPS: %.1f", 1000.0f / lastFrameTime);
                 ImGui::Text("Particles: %d", particle_count);
                 ImGui::End();
@@ -2775,8 +2790,7 @@ private:
             std::uniform_real_distribution<float> rndDist(0.0f, 1.0f);
             std::uniform_real_distribution<float> rndLife(8.0f, 20.0f);
 
-            // Initial particle positions on a circle
-            particle_count = Nx * Ny * Nz / 8;
+            particle_count = 20000000;
             std::vector<Particle> particles(particle_count);
 
             for (uint32_t idx = 0; idx < particle_count; ++idx) {
@@ -2787,7 +2801,7 @@ private:
                     2.0f + rndDist(rndEngine) * (Nz / 2 - 2.0f), 
                     0.0f
                 };
-                particle.color = { 0.0f, 1.0f, 0.0f, rndLife(rndEngine) };
+                particle.color = { 0.0f, 1.0f, 0.0f, (useEmitter == 1) ? 0.0f : rndLife(rndEngine) };
             }
 
             VkDeviceSize bufferSize = sizeof(Particle) * particle_count;
@@ -2830,7 +2844,7 @@ private:
                     float dist = sqrt(dx * dx + dy * dy);
                     float maxDist = sqrt(cx * cx + cy * cy);
                     float t = std::min(dist / maxDist, 1.0f);
-                    // vels[index + 2 * Nxyz] = 0.05f * (1.0f - t) + 0.05f * t;
+                    vels[index + 2 * Nxyz] = 0.05f * (1.0f - t) + 0.05f * t;
                 }
                 else if (z == Nz - 1) {
                     // vels[index + 2 * Nxyz] = 0.0f;
@@ -3806,7 +3820,7 @@ private:
             ubo.Nxyz = Nxyz;
             ubo.particleCount = particle_count;
             ubo.particleRho = 1.0f;
-            ubo.niu = 0.01f;
+            ubo.niu = 0.1f;
             ubo.tau = 3.0f * ubo.niu + 0.5f;
             ubo.inv_tau = 1.0f / ubo.tau;
             ubo.fx = 0.0f;
@@ -3826,6 +3840,10 @@ private:
             ubo.manualMode = isManualControl ? 1 : 0;
             ubo.manualLinVel = glm::vec4(manualLinVel[0], manualLinVel[1], manualLinVel[2], 0.0f);
             ubo.manualAngVel = glm::vec4(manualAngVel[0], manualAngVel[1], manualAngVel[2], 0.0f);
+            ubo.useEmitter = useEmitter;
+            ubo.spawnRate = spawnRate;
+            ubo.emitterPos = glm::vec4(emitterPos[0], emitterPos[1], emitterPos[2], emitterPos[3]);
+            ubo.emitterVel = glm::vec4(emitterVel[0], emitterVel[1], emitterVel[2], emitterVel[3]);
 
             memcpy(uniformBuffersMapped[currentFrame], &ubo, sizeof(ubo));
 

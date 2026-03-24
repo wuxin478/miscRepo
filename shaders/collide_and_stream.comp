@@ -115,6 +115,10 @@ layout (std430, binding = 0) uniform SimulateUBO {
     uint manualMode;
     vec4 manualLinVel;
     vec4 manualAngVel;
+    uint useEmitter;
+    float spawnRate;
+    vec4 emitterPos;
+    vec4 emitterVel;
 } ubo;
 
 layout(std430, binding = 1) buffer Particles {
@@ -367,7 +371,7 @@ void main()
 			Hxz += cxi*czi*fneqi; Hyz += cyi*czi*fneqi; Hzz += czi*czi*fneqi;
 		}
 		const float Q0 = sq(Hxx)+sq(Hyy)+sq(Hzz)+2.0f*(sq(Hxy)+sq(Hxz)+sq(Hyz)); // Q = H*H, turbulent eddy viscosity nut = (C*Delta)^2*|S|, intensity of local strain rate tensor |S|=sqrt(2*S*S)
-		//w = 2.0f/(tau0+sqrt(sq(tau0)+0.76421222f*sqrt(Q0)/rhon)); // 0.76421222 = 18*sqrt(2)*(C*Delta)^2, C = 1/pi*(2/(3*CK))^(3/4) = Smagorinsky-Lilly constant, CK = 3/2 = Kolmogorov constant, Delta = 1 = lattice constant
+		w = 2.0f/(tau0+sqrt(sq(tau0)+0.76421222f*sqrt(Q0)/rhon)); // 0.76421222 = 18*sqrt(2)*(C*Delta)^2, C = 1/pi*(2/(3*CK))^(3/4) = Smagorinsky-Lilly constant, CK = 3/2 = Kolmogorov constant, Delta = 1 = lattice constant
 	} // modity LBM relaxation rate by increasing effective viscosity in regions of high strain rate (add turbulent eddy viscosity), nu_eff = nu_0+nu_t
     
     const float c_tau = fma(w, -0.5f, 1.0f);

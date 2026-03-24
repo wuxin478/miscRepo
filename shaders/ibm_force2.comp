@@ -116,6 +116,10 @@ layout (std430, binding = 0) uniform SimulateUBO {
     uint manualMode;
     vec4 manualLinVel;
     vec4 manualAngVel;
+    uint useEmitter;
+    float spawnRate;
+    vec4 emitterPos;
+    vec4 emitterVel;
 } ubo;
 
 layout(std430, binding = 1) buffer Particles {

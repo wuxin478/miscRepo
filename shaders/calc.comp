@@ -149,6 +149,10 @@ layout (std430, binding = 0) uniform SimulateUBO {
     uint manualMode;
     vec4 manualLinVel;
     vec4 manualAngVel;
+    uint useEmitter;
+    float spawnRate;
+    vec4 emitterPos;
+    vec4 emitterVel;
 } ubo;
 
 layout(std430, binding = 1) buffer Particles {
@@ -430,61 +434,93 @@ void main()
     Particle particle = particles[index];
     
     vec3 p0 = particle.position.xyz;
-    float age = particle.position.w;
     float life = particle.color.a;
 
-    if(ubo.particleRho != 1.0f) { // FORCE_FILED
-		const float drho = ubo.particleRho-1.0f;
-		vec3 Fn = vec3(ubo.fx*drho, ubo.fy*drho, ubo.fz*drho);
-		spread_force(p0, Fn);
-	}
-
-    const vec3 p1 = p0;
-    vec3 un = interpolate_u(p1);
-    un = (un + length(un) * particle_boundary_force(p1));
-    vec3 p = p0 + un;
+    if (life <= 0.0f) {
+        if (ubo.useEmitter == 1u) {
+            uint spawnCount = min(uint(ubo.spawnRate), ubo.particleCount);
+            uint hashVal = hash(index ^ (ubo.t * 0x12345679u));
+            uint emitIndex = hashVal % ubo.particleCount;
+            
+            if (emitIndex < spawnCount) {
+                uint seed = hash3(index, ubo.t, 0xDEADBEEFu);
+                
+                float rand_r = random(hash(seed + 1u));
+                float rand_theta = random(hash(seed + 2u)) * 6.28318530718f;
+                float rand_phi = random(hash(seed + 3u)) * 3.14159265359f;
+                
+                float radius = ubo.emitterPos.w * sqrt(rand_r);
+                vec3 offset = vec3(
+                    radius * sin(rand_phi) * cos(rand_theta),
+                    radius * sin(rand_phi) * sin(rand_theta),
+                    radius * cos(rand_phi)
+                );
+                
+                vec3 spawnPos = ubo.emitterPos.xyz + offset;
+                
+                particles[index].position = vec4(spawnPos, 0.0f);
+                particles[index].color = vec4(0.8f, 0.8f, 0.2f, 1.0f);
+            }
+        }
+        return;
+    }
     
+    if (p0.z >= ubo.Nz - 2.0f || p0.z < 2.0f ||
+        p0.x < 2.0f || p0.x >= ubo.Nx - 2.0f ||
+        p0.y < 2.0f || p0.y >= ubo.Ny - 2.0f) {
+        particles[index].color.a = 0.0f;
+        return;
+    }
+
+    if(ubo.particleRho != 1.0f) {
+        const float drho = ubo.particleRho-1.0f;
+        vec3 Fn = vec3(ubo.fx*drho, ubo.fy*drho, ubo.fz*drho);
+        spread_force(p0, Fn);
+    }
+
+    // ==========================================
+    // 核心修改：使用 RK3 替代 RK2，且移除强加的 boundary_force
+    // ==========================================
+    
+    // RK3 Step 1
+    vec3 k1 = interpolate_u(p0);
+    vec3 p1 = p0 + k1 * 0.5f;
+    
+    // RK3 Step 2
+    vec3 k2 = interpolate_u(p1);
+    vec3 p2 = p0 + k2 * 0.75f;
+    
+    // RK3 Step 3
+    vec3 k3 = interpolate_u(p2);
+    
+    // 最终位置 (RK3 公式)
+    vec3 p = p0 + (2.0f/9.0f)*k1 + (3.0f/9.0f)*k2 + (4.0f/9.0f)*k3;
+
+    // ==========================================
+    // 核心修改：加强物理随机游走 (Brownian Motion) 
+    // 打破三线性插值带来的 Sub-grid Attractors
+    // ==========================================
     if (ubo.render_mode == 1) {
-        float jitter = 0.005;
-        p.x += (random2(floatBitsToUint(p.x), floatBitsToUint(p.y)) - 0.5f) * jitter;
-        p.y += (random2(floatBitsToUint(p.y), floatBitsToUint(p.z)) - 0.5f) * jitter;
-        p.z += (random2(floatBitsToUint(p.z), floatBitsToUint(p.x)) - 0.5f) * jitter;
-    }
-
-    age += ubo.dt;
-    
-    bool needRespawn = false;
-    
-    if (p.z >= ubo.Nz - 2.0f) {
-        needRespawn = true;
-    }
-    
-    if (p.z <= 1.0f) {
-        needRespawn = true;
-    }
-    
-    if (p.x <= 1.0f || p.x >= ubo.Nx - 2.0f || p.y <= 1.0f || p.y >= ubo.Ny - 2.0f) {
-        needRespawn = true;
-    }
-    
-    if (age >= life) {
-        needRespawn = true;
-    }
-    
-    if (needRespawn) {
-        uint seed = hash3(index, ubo.t, 0x12345678u);
-        float rand_x = random(seed);
-        float rand_y = random(hash(seed + 1u));
-        float rand_z = random(hash(seed + 2u));
-        float rand_life = 8.0f + random(hash(seed + 3u)) * 12.0f;
+        // 根据你的流场速度(0.05)，0.005 太小了，建议提升至 0.02 到 0.04 之间
+        // 它的物理意义是分子热运动扩散，能让烟雾看起来更顺滑
+        float jitter = 0.03f; 
         
-        p.x = 2.0f + rand_x * (ubo.Nx - 4.0f);
-        p.y = 2.0f + rand_y * (ubo.Ny - 4.0f);
-        p.z = 1.0f + rand_z * 2.0f;
+        // 保证随机种子每一帧都在变化，引入 ubo.t
+        uint seed_x = floatBitsToUint(p.x) ^ ubo.t;
+        uint seed_y = floatBitsToUint(p.y) ^ (ubo.t * 13u);
+        uint seed_z = floatBitsToUint(p.z) ^ (ubo.t * 17u);
         
-        particles[index].position = vec4(p, 0.0f);
-        particles[index].color = vec4(0.8f, 0.8f, 0.2f, rand_life);
+        p.x += (random2(seed_x, seed_y) - 0.5f) * jitter;
+        p.y += (random2(seed_y, seed_z) - 0.5f) * jitter;
+        p.z += (random2(seed_z, seed_x) - 0.5f) * jitter;
+    }
+    
+    // 边界 Clamp 与消亡逻辑
+    if (p.z >= ubo.Nz - 1.0f || p.z < 1.0f ||
+        p.x < 1.0f || p.x >= ubo.Nx - 1.0f ||
+        p.y < 1.0f || p.y >= ubo.Ny - 1.0f) {
+        particles[index].color.a = 0.0f;
     } else {
-        particles[index].position = vec4(p, age);
+        particles[index].position = vec4(p, 0.0f);
     }
 }

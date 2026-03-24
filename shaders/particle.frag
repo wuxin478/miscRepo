@@ -14,7 +14,7 @@ void main() {
     } else {
         float dist = length(gl_PointCoord - vec2(0.5));
         float mask = smoothstep(0.5, 0.2, dist);
-        float finalAlpha = mask * fragAlpha * 0.15;
+        float finalAlpha = mask * 0.5;
         outColor = vec4(fragColor, finalAlpha);
     }
 }
