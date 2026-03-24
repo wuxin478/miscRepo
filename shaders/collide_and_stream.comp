@@ -308,6 +308,8 @@ void main()
 	uint flagsn_bo=flagsn&TYPE_BO, flagsn_su=flagsn&TYPE_SU; // extract boundary and surface flags
 	if(flagsn_bo==TYPE_S||flagsn_su==TYPE_G) return; // if cell is solid boundary or gas, just return
     
+    bool is_outflow = ((flagsn & TYPE_X) != 0); 
+
     uint nbs[Q];
     neighbors(index, nbs);
     
@@ -319,7 +321,28 @@ void main()
     }
 
     float rhon, uxn, uyn, uzn; // calculate local density and velocity for collision
-    if(flagsn_bo==TYPE_E) {
+    
+    if (is_outflow) {
+        // 动态获取靠内的相邻流体节点
+        uint inner_idx = index;
+        uvec3 xyz = coordinates(index);
+        uint x0, xp, xm, y0, yp, ym, z0, zp, zm;
+        calculate_indices(index, x0, xp, xm, y0, yp, ym, z0, zp, zm);
+
+        // 根据处于哪一个面，读取反方向相邻格子的数据
+        if      (xyz.z == ubo.Nz - 1) inner_idx = x0 + y0 + zm; // 顶部流出，读取下方格子
+        else if (xyz.z == 0)          inner_idx = x0 + y0 + zp; // 底部流出，读取上方格子
+        else if (xyz.x == ubo.Nx - 1) inner_idx = xm + y0 + z0; // 右侧流出，读取左侧格子
+        else if (xyz.x == 0)          inner_idx = xp + y0 + z0; // 左侧流出，读取右侧格子
+        else if (xyz.y == ubo.Ny - 1) inner_idx = x0 + ym + z0; // 后方流出，读取前方格子
+        else if (xyz.y == 0)          inner_idx = x0 + yp + z0; // 前方流出，读取后方格子
+
+        // 强行拷贝相邻流体格子的密度和速度，形成零梯度
+        rhon = rhos[inner_idx];
+        uxn  = vels[inner_idx];
+        uyn  = vels[ubo.Nxyz + inner_idx];
+        uzn  = vels[2u * ubo.Nxyz + inner_idx];
+    } else if(flagsn_bo==TYPE_E) {
         rhon = rhos[            index]; // apply preset velocity/density
         uxn  = vels[            index];
         uyn  = vels[   ubo.Nxyz+index];
@@ -333,9 +356,9 @@ void main()
     
     // FORCE_FIELD
     { // separate block to avoid variable name conflicts
-		fxn += float(bfs[            index]); // apply force field
-		fyn += float(bfs[   ubo.Nxyz+index]);
-		fzn += float(bfs[2u*ubo.Nxyz+index]);
+		fxn += 2.0f * rhon * float(bfs[            index]); // apply force field
+		fyn += 2.0f * rhon * float(bfs[   ubo.Nxyz+index]);
+		fzn += 2.0f * rhon * float(bfs[2u*ubo.Nxyz+index]);
 	}
 
     // VOLUME_FORCE
@@ -348,7 +371,7 @@ void main()
     }
 
     // EQUILIBRIUM BOUNDARIES
-    if(flagsn_bo!=TYPE_E) { // only update fields for non-TYPE_E cells
+    if(flagsn_bo!=TYPE_E != is_outflow) { // only update fields for non-TYPE_E cells
         rhos[            index] = rhon; // update density field
         vels[            index] = uxn; // update velocity field
         vels[   ubo.Nxyz+index] = uyn;
@@ -376,7 +399,7 @@ void main()
     
     const float c_tau = fma(w, -0.5f, 1.0f);
 	for(uint q=0u; q<Q; q++) Fin[q] *= c_tau;
-    for(uint q=0u; q<Q; q++) fhn[q] = flagsn_bo==TYPE_E ? feq[q] : fma(1.0f-w, fhn[q], fma(w, feq[q], Fin[q])); // perform collision (SRT)
+    for(uint q=0u; q<Q; q++) fhn[q] = flagsn_bo==TYPE_E || is_outflow ? feq[q] : fma(1.0f-w, fhn[q], fma(w, feq[q], Fin[q])); // perform collision (SRT)
 
     store_f(index, fhn, nbs, ubo.t); // perform streaming (part 1)
 }

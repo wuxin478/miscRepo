@@ -3092,11 +3092,11 @@ private:
             std::vector<uint> flags(Nxyz, 0);
             parallel_for(Nxyz, [&](uint32_t index) { uint x = index % Nx, y = (index - x) / Nx % Ny, z = index / Nx / Ny;
                 if (x == 0 || x == Nx - 1 || y == 0 || y == Ny - 1) {
-                    flags[index] = TYPE_S;
+                    flags[index] = TYPE_X;
                 } else if (z == 0) {
                     flags[index] = TYPE_E;
                 } else if (z == Nz - 1) {
-                    flags[index] = TYPE_E;
+                    flags[index] = TYPE_X;
                 }
             });
 
