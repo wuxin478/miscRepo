@@ -20,6 +20,7 @@ constexpr float PI = 3.14159265358979323846f;
 
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <algorithm>
 #include <chrono>
@@ -244,7 +245,8 @@ struct TotalForceTorque {
 enum class RigidBodyShape {
     SPHERE,
     BOX,
-    CYLINDER
+    CYLINDER,
+    MESH
 };
 
 void generateSphere(float R, float target_spacing,
@@ -335,6 +337,93 @@ void generateCylinder(float R, float H, float target_spacing,
     generateCap(-H/2.0f);
 }
 
+struct MeshParticleData {
+    glm::vec3 position;
+    glm::vec3 normal;
+    float sk;
+};
+
+bool loadMeshFromCSV(const std::string& filepath,
+                     std::vector<glm::vec3>& positions,
+                     std::vector<float>& sk_buffer,
+                     std::vector<glm::vec3>& normals) {
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open CSV file: " << filepath << std::endl;
+        return false;
+    }
+
+    std::string line;
+    std::getline(file, line);
+
+    while (std::getline(file, line)) {
+        std::stringstream ss(line);
+        std::string token;
+        MeshParticleData data;
+
+        std::getline(ss, token, ',');
+        data.position.x = std::stof(token);
+        std::getline(ss, token, ',');
+        data.position.y = std::stof(token);
+        std::getline(ss, token, ',');
+        data.position.z = std::stof(token);
+        std::getline(ss, token, ',');
+        data.normal.x = std::stof(token);
+        std::getline(ss, token, ',');
+        data.normal.y = std::stof(token);
+        std::getline(ss, token, ',');
+        data.normal.z = std::stof(token);
+        std::getline(ss, token, ',');
+        data.sk = std::stof(token);
+
+        positions.push_back(data.position);
+        normals.push_back(data.normal);
+        sk_buffer.push_back(data.sk);
+    }
+
+    std::cout << "Loaded " << positions.size() << " particles from CSV: " << filepath << std::endl;
+    return true;
+}
+
+bool loadMeshFromBIN(const std::string& filepath,
+                     std::vector<glm::vec3>& positions,
+                     std::vector<float>& sk_buffer,
+                     std::vector<glm::vec3>& normals) {
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open BIN file: " << filepath << std::endl;
+        return false;
+    }
+
+    file.seekg(0, std::ios::end);
+    std::streamsize fileSize = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    const size_t floatsPerParticle = 7;
+    size_t numParticles = fileSize / (floatsPerParticle * sizeof(float));
+
+    if (fileSize % (floatsPerParticle * sizeof(float)) != 0) {
+        std::cerr << "Warning: BIN file size not aligned with particle data size" << std::endl;
+    }
+
+    std::vector<float> buffer(numParticles * floatsPerParticle);
+    file.read(reinterpret_cast<char*>(buffer.data()), fileSize);
+
+    positions.resize(numParticles);
+    normals.resize(numParticles);
+    sk_buffer.resize(numParticles);
+
+    for (size_t i = 0; i < numParticles; ++i) {
+        size_t offset = i * floatsPerParticle;
+        positions[i] = glm::vec3(buffer[offset + 0], buffer[offset + 1], buffer[offset + 2]);
+        normals[i] = glm::vec3(buffer[offset + 3], buffer[offset + 4], buffer[offset + 5]);
+        sk_buffer[i] = buffer[offset + 6];
+    }
+
+    std::cout << "Loaded " << numParticles << " particles from BIN: " << filepath << std::endl;
+    return true;
+}
+
 struct RigidBody {
     RigidBodyShape shape = RigidBodyShape::SPHERE;
     float rho;
@@ -351,14 +440,24 @@ struct RigidBody {
     glm::quat orientation;
     glm::vec3 linear_velocity;
     glm::vec3 angular_velocity;
+    std::string meshFilePath;
+    glm::vec3 meshBoundingBoxMin;
+    glm::vec3 meshBoundingBoxMax;
+    float meshScale;
+    int meshCoordSystem;
 
     RigidBody() {
-        shape = RigidBodyShape::BOX;
+        shape = RigidBodyShape::MESH;
         rho = 1.0f;
         radius = 10.0f;
         boxSize = glm::vec3(40.0f, 3.0f, 25.0f);
         cylinderRadius = 10.0f;
         cylinderHeight = 20.0f;
+        meshFilePath = "models/box_unified_data.bin";
+        meshBoundingBoxMin = glm::vec3(-1.0f);
+        meshBoundingBoxMax = glm::vec3(1.0f);
+        meshScale = 20.0f;
+        meshCoordSystem = 1;
         updateInertia();
         float travel_distance = 48.0f;
         float a_point = Ny / 2.0f - travel_distance / 2.0f;
@@ -401,6 +500,23 @@ struct RigidBody {
                     float I_perp = mass * (3.0f * cylinderRadius * cylinderRadius + cylinderHeight * cylinderHeight) / 12.0f;
                     inertiaTensor = glm::mat3(I_perp, 0, 0, 0, I_perp, 0, 0, 0, I_axis);
                     invInertiaTensor = glm::mat3(1.0f/I_perp, 0, 0, 0, 1.0f/I_perp, 0, 0, 0, 1.0f/I_axis);
+                }
+                break;
+            case RigidBodyShape::MESH:
+                volume = (meshBoundingBoxMax.x - meshBoundingBoxMin.x) *
+                         (meshBoundingBoxMax.y - meshBoundingBoxMin.y) *
+                         (meshBoundingBoxMax.z - meshBoundingBoxMin.z);
+                mass = rho * volume;
+                inv_mass = 1.0f / mass;
+                {
+                    float W = meshBoundingBoxMax.x - meshBoundingBoxMin.x;
+                    float H = meshBoundingBoxMax.y - meshBoundingBoxMin.y;
+                    float D = meshBoundingBoxMax.z - meshBoundingBoxMin.z;
+                    float Ix = mass * (H * H + D * D) / 12.0f;
+                    float Iy = mass * (W * W + D * D) / 12.0f;
+                    float Iz = mass * (W * W + H * H) / 12.0f;
+                    inertiaTensor = glm::mat3(Ix, 0, 0, 0, Iy, 0, 0, 0, Iz);
+                    invInertiaTensor = glm::mat3(1.0f/Ix, 0, 0, 0, 1.0f/Iy, 0, 0, 0, 1.0f/Iz);
                 }
                 break;
         }
@@ -2738,6 +2854,7 @@ private:
         {
             std::vector<glm::vec3> positions;
             std::vector<float> skValues;
+            std::vector<glm::vec3> normals;
             
             float target_spacing = 0.5f;
             
@@ -2751,6 +2868,88 @@ private:
                 case RigidBodyShape::CYLINDER:
                     generateCylinder(mySphere.cylinderRadius, mySphere.cylinderHeight, target_spacing, positions, skValues);
                     break;
+                case RigidBodyShape::MESH:
+                    {
+                        std::string binPath = mySphere.meshFilePath;
+                        std::string csvPath;
+                        size_t dotPos = binPath.find_last_of('.');
+                        if (dotPos != std::string::npos) {
+                            csvPath = binPath.substr(0, dotPos) + ".csv";
+                        } else {
+                            csvPath = binPath + ".csv";
+                        }
+                        
+                        bool loaded = false;
+                        if (binPath.find(".bin") != std::string::npos) {
+                            loaded = loadMeshFromBIN(binPath, positions, skValues, normals);
+                        }
+                        if (!loaded) {
+                            loaded = loadMeshFromCSV(csvPath, positions, skValues, normals);
+                        }
+                        
+                        if (!loaded || positions.empty()) {
+                            std::cerr << "Failed to load mesh data, falling back to BOX shape" << std::endl;
+                            generateBox(mySphere.boxSize, target_spacing, positions, skValues);
+                        } else {
+                            if (mySphere.meshCoordSystem == 1) {
+                                std::cout << "Applying coordinate transform: Y-up (OpenGL) -> Z-up (Vulkan)" << std::endl;
+                                for (auto& pos : positions) {
+                                    float tmp = pos.y;
+                                    pos.y = pos.z;
+                                    pos.z = tmp;
+                                }
+                                for (auto& norm : normals) {
+                                    float tmp = norm.y;
+                                    norm.y = norm.z;
+                                    norm.z = tmp;
+                                }
+                            } else if (mySphere.meshCoordSystem == 2) {
+                                std::cout << "Applying coordinate transform: Z-up -> Y-up" << std::endl;
+                                for (auto& pos : positions) {
+                                    float tmp = pos.z;
+                                    pos.z = pos.y;
+                                    pos.y = tmp;
+                                }
+                                for (auto& norm : normals) {
+                                    float tmp = norm.z;
+                                    norm.z = norm.y;
+                                    norm.y = tmp;
+                                }
+                            }
+                            
+                            float scale = mySphere.meshScale;
+                            for (auto& pos : positions) {
+                                pos *= scale;
+                            }
+                            for (auto& sk : skValues) {
+                                sk *= scale * scale;
+                            }
+                            
+                            mySphere.meshBoundingBoxMin = positions[0];
+                            mySphere.meshBoundingBoxMax = positions[0];
+                            for (const auto& pos : positions) {
+                                mySphere.meshBoundingBoxMin = glm::min(mySphere.meshBoundingBoxMin, pos);
+                                mySphere.meshBoundingBoxMax = glm::max(mySphere.meshBoundingBoxMax, pos);
+                            }
+                            std::cout << "Mesh bounding box (scaled): ("
+                                      << mySphere.meshBoundingBoxMin.x << ", " 
+                                      << mySphere.meshBoundingBoxMin.y << ", " 
+                                      << mySphere.meshBoundingBoxMin.z << ") to ("
+                                      << mySphere.meshBoundingBoxMax.x << ", " 
+                                      << mySphere.meshBoundingBoxMax.y << ", " 
+                                      << mySphere.meshBoundingBoxMax.z << ")" << std::endl;
+                            float totalArea = 0.0f;
+                            for (float sk : skValues) totalArea += sk;
+                            std::cout << "Total surface area from sk values (scaled): " << totalArea << std::endl;
+                            mySphere.updateInertia();
+                        }
+                    }
+                    break;
+            }
+            
+            if (mySphere.shape == RigidBodyShape::MESH && positions.empty()) {
+                mySphere.shape = RigidBodyShape::BOX;
+                mySphere.updateInertia();
             }
             
             lagrangianPointCount = static_cast<uint32_t>(positions.size());
