@@ -424,6 +424,144 @@ bool loadMeshFromBIN(const std::string& filepath,
     return true;
 }
 
+bool loadMeshFromGLB(const std::string& filepath,
+                     std::vector<glm::vec3>& positions,
+                     std::vector<float>& sk_buffer,
+                     std::vector<glm::vec3>& normals) {
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open GLB file: " << filepath << std::endl;
+        return false;
+    }
+
+    uint32_t magic, version, totalLength;
+    file.read(reinterpret_cast<char*>(&magic), 4);
+    file.read(reinterpret_cast<char*>(&version), 4);
+    file.read(reinterpret_cast<char*>(&totalLength), 4);
+
+    if (magic != 0x46546C67) {
+        std::cerr << "Invalid GLB file: wrong magic number" << std::endl;
+        return false;
+    }
+
+    uint32_t jsonChunkLength, jsonChunkType;
+    file.read(reinterpret_cast<char*>(&jsonChunkLength), 4);
+    file.read(reinterpret_cast<char*>(&jsonChunkType), 4);
+
+    if (jsonChunkType != 0x4E4F534A) {
+        std::cerr << "Invalid GLB file: expected JSON chunk" << std::endl;
+        return false;
+    }
+
+    std::string jsonContent(jsonChunkLength, '\0');
+    file.read(&jsonContent[0], jsonChunkLength);
+
+    uint32_t binChunkLength = 0, binChunkType = 0;
+    file.read(reinterpret_cast<char*>(&binChunkLength), 4);
+    file.read(reinterpret_cast<char*>(&binChunkType), 4);
+
+    if (binChunkType != 0x004E4942) {
+        std::cerr << "Invalid GLB file: expected BIN chunk" << std::endl;
+        return false;
+    }
+
+    auto extractNumber = [](const std::string& json, const std::string& key, size_t startPos = 0) -> int {
+        std::string searchStr = "\"" + key + "\"";
+        size_t pos = json.find(searchStr, startPos);
+        if (pos == std::string::npos) return -1;
+        
+        size_t colonPos = json.find(':', pos);
+        if (colonPos == std::string::npos) return -1;
+        
+        size_t valueStart = json.find_first_of("-0123456789", colonPos);
+        if (valueStart == std::string::npos) return -1;
+        
+        size_t valueEnd = json.find_first_not_of("-0123456789", valueStart);
+        if (valueEnd == std::string::npos) valueEnd = json.length();
+        
+        try {
+            return std::stoi(json.substr(valueStart, valueEnd - valueStart));
+        } catch (...) {
+            return -1;
+        }
+    };
+
+    int vertexCount = -1;
+    size_t accessorPos = jsonContent.find("\"accessors\"");
+    if (accessorPos != std::string::npos) {
+        size_t countPos = jsonContent.find("\"count\"", accessorPos);
+        if (countPos != std::string::npos) {
+            vertexCount = extractNumber(jsonContent, "count", countPos);
+        }
+    }
+    
+    int bufferViewByteOffset = 0;
+    size_t bufferViewPos = jsonContent.find("\"bufferViews\"");
+    if (bufferViewPos != std::string::npos) {
+        size_t byteOffsetPos = jsonContent.find("\"byteOffset\"", bufferViewPos);
+        if (byteOffsetPos != std::string::npos) {
+            bufferViewByteOffset = extractNumber(jsonContent, "byteOffset", byteOffsetPos);
+        }
+    }
+    
+    int accessorByteOffset = 0;
+    if (accessorPos != std::string::npos) {
+        size_t byteOffsetPos = jsonContent.find("\"byteOffset\"", accessorPos);
+        if (byteOffsetPos != std::string::npos && byteOffsetPos < jsonContent.find("]", accessorPos)) {
+            accessorByteOffset = extractNumber(jsonContent, "byteOffset", byteOffsetPos);
+        }
+    }
+
+    if (vertexCount <= 0) {
+        vertexCount = binChunkLength / sizeof(glm::vec3);
+    }
+    
+    size_t totalVertices = static_cast<size_t>(vertexCount);
+    size_t particleCount = totalVertices / 2;
+    
+    if (particleCount == 0) {
+        std::cerr << "Invalid GLB: no particle data found" << std::endl;
+        return false;
+    }
+
+    size_t binDataOffset = 12 + 8 + jsonChunkLength + 8;
+    size_t dataOffset = binDataOffset + bufferViewByteOffset + accessorByteOffset;
+    
+    std::cout << "GLB Debug: vertexCount=" << vertexCount 
+              << ", bufferViewByteOffset=" << bufferViewByteOffset
+              << ", accessorByteOffset=" << accessorByteOffset
+              << ", binDataOffset=" << binDataOffset
+              << ", dataOffset=" << dataOffset << std::endl;
+    
+    file.seekg(dataOffset, std::ios::beg);
+    
+    std::vector<glm::vec3> allVertices(totalVertices);
+    file.read(reinterpret_cast<char*>(allVertices.data()), totalVertices * sizeof(glm::vec3));
+
+    positions.resize(particleCount);
+    sk_buffer.resize(particleCount);
+    normals.resize(particleCount, glm::vec3(0.0f));
+
+    for (size_t i = 0; i < particleCount; ++i) {
+        positions[i] = allVertices[i];
+        sk_buffer[i] = allVertices[i + particleCount].x;
+    }
+
+    std::cout << "Loaded " << particleCount << " particles from GLB: " << filepath << std::endl;
+    std::cout << "Total vertices in GLB: " << totalVertices << std::endl;
+    
+    float skSum = 0.0f;
+    for (size_t i = 0; i < std::min(size_t(5), particleCount); ++i) {
+        std::cout << "  sk[" << i << "] = " << sk_buffer[i] << std::endl;
+        skSum += sk_buffer[i];
+    }
+    float totalSk = 0.0f;
+    for (float sk : sk_buffer) totalSk += sk;
+    std::cout << "Total sk sum: " << totalSk << std::endl;
+    
+    return true;
+}
+
 struct RigidBody {
     RigidBodyShape shape = RigidBodyShape::SPHERE;
     float rho;
@@ -453,7 +591,7 @@ struct RigidBody {
         boxSize = glm::vec3(40.0f, 3.0f, 25.0f);
         cylinderRadius = 10.0f;
         cylinderHeight = 20.0f;
-        meshFilePath = "models/box_unified_data.bin";
+        meshFilePath = "models/box_pointcloud.glb";
         meshBoundingBoxMin = glm::vec3(-1.0f);
         meshBoundingBoxMax = glm::vec3(1.0f);
         meshScale = 20.0f;
@@ -2870,20 +3008,19 @@ private:
                     break;
                 case RigidBodyShape::MESH:
                     {
-                        std::string binPath = mySphere.meshFilePath;
-                        std::string csvPath;
-                        size_t dotPos = binPath.find_last_of('.');
-                        if (dotPos != std::string::npos) {
-                            csvPath = binPath.substr(0, dotPos) + ".csv";
-                        } else {
-                            csvPath = binPath + ".csv";
-                        }
+                        std::string meshPath = mySphere.meshFilePath;
                         
                         bool loaded = false;
-                        if (binPath.find(".bin") != std::string::npos) {
-                            loaded = loadMeshFromBIN(binPath, positions, skValues, normals);
-                        }
-                        if (!loaded) {
+                        if (meshPath.find(".glb") != std::string::npos || meshPath.find(".GLB") != std::string::npos) {
+                            loaded = loadMeshFromGLB(meshPath, positions, skValues, normals);
+                        } else if (meshPath.find(".bin") != std::string::npos || meshPath.find(".BIN") != std::string::npos) {
+                            loaded = loadMeshFromBIN(meshPath, positions, skValues, normals);
+                        } else {
+                            std::string csvPath = meshPath;
+                            size_t dotPos = meshPath.find_last_of('.');
+                            if (dotPos != std::string::npos) {
+                                csvPath = meshPath.substr(0, dotPos) + ".csv";
+                            }
                             loaded = loadMeshFromCSV(csvPath, positions, skValues, normals);
                         }
                         
