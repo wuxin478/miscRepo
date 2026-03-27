@@ -87,7 +87,7 @@ void main() {
         body.ang_vel.xyz = (body.ang_vel.xyz + ang_acc * dt) * 0.999;
     }
 
-    float max_vel = 0.4;
+    float max_vel = 0.2;
     float lin_vel_len = length(body.lin_vel.xyz);
     if (lin_vel_len > max_vel) {
         body.lin_vel.xyz = normalize(body.lin_vel.xyz) * max_vel;

@@ -353,17 +353,19 @@ struct RigidBody {
     glm::vec3 angular_velocity;
 
     RigidBody() {
-        shape = RigidBodyShape::SPHERE;
+        shape = RigidBodyShape::BOX;
         rho = 1.0f;
         radius = 10.0f;
-        boxSize = glm::vec3(20.0f, 20.0f, 20.0f);
+        boxSize = glm::vec3(40.0f, 3.0f, 25.0f);
         cylinderRadius = 10.0f;
         cylinderHeight = 20.0f;
         updateInertia();
-        position = glm::vec3(Nx / 2.0f, Ny / 2.0f, Nz / 2.0f);
+        float travel_distance = 48.0f;
+        float a_point = Ny / 2.0f - travel_distance / 2.0f;
+        position = glm::vec3(Nx / 2.0f, a_point, Nz / 2.0f);
         orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
         linear_velocity = glm::vec3(0.0f);
-        angular_velocity = glm::vec3(0.0f, 0.0f, 0.05f);
+        angular_velocity = glm::vec3(0.0f, 0.0f, 0.0f);
     }
 
     void updateInertia() {
@@ -432,9 +434,9 @@ private:
     float manualAngVel[3] = { 0.0f, 0.0f, 0.0f };
     float rigidBodyDensity = 1.0f;
     uint32_t useEmitter = 1;
-    float spawnRate = 5000.0f;
-    float emitterPos[4] = { Nx / 2.0f, Ny / 2.0f, 2.0f, 1.0f };
-    float emitterVel[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float spawnRate = 200.0f;
+    float emitterPos[4] = { Nx / 2.0f, Ny / 2.0f, 5.0f, 1.0f };
+    float emitterVel[4] = { 0.0f, 0.0f, 0.15f, 0.0f };
 
     VkInstance instance;
     VkDebugUtilsMessengerEXT debugMessenger;
@@ -4028,7 +4030,42 @@ private:
             ubo.radius = mySphere.radius;
             ubo.volume = mySphere.volume;
             ubo.manualMode = isManualControl ? 1 : 0;
-            ubo.manualLinVel = glm::vec4(manualLinVel[0], manualLinVel[1], manualLinVel[2], 0.0f);
+            float travel_distance = 48.0f;
+            float max_vel = 0.2f;
+            int accel_frames = 60;
+            int pause_frames = 30;
+            float a_point = Ny / 2.0f - travel_distance / 2.0f;
+            float b_point = Ny / 2.0f + travel_distance / 2.0f;
+            auto smootherstep = [](float t) { return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f); };
+            float accel_distance = max_vel * accel_frames * 0.5f;
+            float cruise_distance = travel_distance - 2.0f * accel_distance;
+            int cruise_frames = (int)std::max(1.0f, cruise_distance / max_vel);
+            int half_cycle = accel_frames + cruise_frames + accel_frames + pause_frames;
+            int full_cycle = half_cycle * 2;
+            int t_mod = currentTime % full_cycle;
+            float vy = 0.0f;
+            if (t_mod < accel_frames) {
+                float t = smootherstep((float)t_mod / accel_frames);
+                vy = t * max_vel;
+            } else if (t_mod < accel_frames + cruise_frames) {
+                vy = max_vel;
+            } else if (t_mod < accel_frames * 2 + cruise_frames) {
+                float t = smootherstep(1.0f - (float)(t_mod - accel_frames - cruise_frames) / accel_frames);
+                vy = t * max_vel;
+            } else if (t_mod < half_cycle) {
+                vy = 0.0f;
+            } else if (t_mod < half_cycle + accel_frames) {
+                float t = smootherstep((float)(t_mod - half_cycle) / accel_frames);
+                vy = -t * max_vel;
+            } else if (t_mod < half_cycle + accel_frames + cruise_frames) {
+                vy = -max_vel;
+            } else if (t_mod < half_cycle + accel_frames * 2 + cruise_frames) {
+                float t = smootherstep(1.0f - (float)(t_mod - half_cycle - accel_frames - cruise_frames) / accel_frames);
+                vy = -t * max_vel;
+            } else {
+                vy = 0.0f;
+            }
+            ubo.manualLinVel = glm::vec4(manualLinVel[0], vy, manualLinVel[2], 0.0f);
             ubo.manualAngVel = glm::vec4(manualAngVel[0], manualAngVel[1], manualAngVel[2], 0.0f);
             ubo.useEmitter = useEmitter;
             ubo.spawnRate = spawnRate;
