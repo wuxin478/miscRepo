@@ -135,15 +135,7 @@ struct SimulateUBO {
     alignas(4) uint32_t fixed_point_iteration = 0;
     alignas(4) uint32_t lagrangianPointCount = 0;
     alignas(4) float couplingStrength = 0.1f;
-    alignas(4) float mass = 1.0f;
-    alignas(4) float inv_mass = 1.0f;
-    alignas(4) float inertia_scalar = 1.0f;
-    alignas(4) float inv_inertia = 1.0f;
-    alignas(4) float radius = 10.0f;
-    alignas(4) float volume = 1.0f;
-    alignas(4) uint32_t manualMode = 0;
-    alignas(16) glm::vec4 manualLinVel = glm::vec4(0.0f);
-    alignas(16) glm::vec4 manualAngVel = glm::vec4(0.0f);
+    alignas(4) uint32_t rigidBodyCount = 0;
     alignas(4) uint32_t useEmitter = 0;
     alignas(4) float spawnRate = 10.0f;
     alignas(16) glm::vec4 emitterPos = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -156,6 +148,16 @@ struct RigidBodyState {
     alignas(16) glm::vec4 lin_vel;
     alignas(16) glm::vec4 ang_vel;
     alignas(16) glm::mat4 modelMatrix;
+};
+
+struct RigidBodyInfo {
+    alignas(4) float mass;
+    alignas(4) float inv_mass;
+    alignas(4) float inv_inertia;
+    alignas(4) float volume;
+    alignas(4) uint32_t manualMode;
+    alignas(16) glm::vec4 manualLinVel;
+    alignas(16) glm::vec4 manualAngVel;
 };
 
 struct RenderingUBO {
@@ -583,6 +585,9 @@ struct RigidBody {
     glm::vec3 meshBoundingBoxMax;
     float meshScale;
     int meshCoordSystem;
+    bool isManualControl = true;
+    float manualLinVel[3] = {0.0f, 0.0f, 0.0f};
+    float manualAngVel[3] = {0.0f, 0.0f, 0.0f};
 
     RigidBody() {
         shape = RigidBodyShape::MESH;
@@ -596,6 +601,7 @@ struct RigidBody {
         meshBoundingBoxMax = glm::vec3(1.0f);
         meshScale = 40.0f;
         meshCoordSystem = 1;
+        isManualControl = true;
         updateInertia();
         float travel_distance = 48.0f;
         float a_point = Ny / 2.0f - travel_distance / 2.0f;
@@ -658,6 +664,31 @@ struct RigidBody {
                 }
                 break;
         }
+    }
+
+    RigidBodyState getRigidBodyState() const {
+        RigidBodyState state;
+        state.position = glm::vec4(position, 1.0f);
+        state.orientation = glm::vec4(orientation.x, orientation.y, orientation.z, orientation.w);
+        state.lin_vel = glm::vec4(linear_velocity, 0.0f);
+        state.ang_vel = glm::vec4(angular_velocity, 0.0f);
+        glm::mat4 M = glm::mat4(1.0f);
+        M = glm::translate(M, position);
+        M = M * glm::mat4_cast(orientation);
+        state.modelMatrix = M;
+        return state;
+    }
+
+    RigidBodyInfo getRigidBodyInfo() const {
+        RigidBodyInfo info;
+        info.mass = mass;
+        info.inv_mass = inv_mass;
+        info.inv_inertia = invInertiaTensor[0][0];
+        info.volume = volume;
+        info.manualMode = isManualControl ? 1u : 0u;
+        info.manualLinVel = glm::vec4(manualLinVel[0], manualLinVel[1], manualLinVel[2], 0.0f);
+        info.manualAngVel = glm::vec4(manualAngVel[0], manualAngVel[1], manualAngVel[2], 0.0f);
+        return info;
     }
 };
 
@@ -778,8 +809,13 @@ private:
 
     std::vector<VkBuffer> rigidBodyStateBuffers;
     std::vector<VkDeviceMemory> rigidBodyStateBuffersMemory;
+    std::vector<VkBuffer> rigidBodyInfoBuffers;
+    std::vector<VkDeviceMemory> rigidBodyInfoBuffersMemory;
+    std::vector<VkBuffer> bodyIndexBuffers;
+    std::vector<VkDeviceMemory> bodyIndexBuffersMemory;
 
-    RigidBody mySphere;
+    std::vector<RigidBody> rigidBodies;
+    uint32_t rigidBodyCount = 0;
 
     std::vector<VkBuffer> wireframeBuffers;
     std::vector<VkDeviceMemory> wireframeBuffersMemory;
@@ -1131,15 +1167,18 @@ private:
                     ImGui::Text("Mode: Bi-directional Physics");
                 }
                 ImGui::Separator();
-                if (ImGui::SliderFloat("Density", &rigidBodyDensity, 0.1f, 2.0f, "%.2f")) {
-                    mySphere.rho = rigidBodyDensity;
-                    mySphere.mass = mySphere.rho * mySphere.volume;
-                    mySphere.inv_mass = 1.0f / mySphere.mass;
-                    float I = 0.4f * mySphere.mass * mySphere.radius * mySphere.radius;
-                    mySphere.inertiaTensor = glm::mat3(I);
-                    mySphere.invInertiaTensor = glm::mat3(1.0f / I);
+                if (!rigidBodies.empty()) {
+                    if (ImGui::SliderFloat("Density", &rigidBodyDensity, 0.1f, 2.0f, "%.2f")) {
+                        for (auto& body : rigidBodies) {
+                            body.rho = rigidBodyDensity;
+                            body.updateInertia();
+                        }
+                    }
+                    ImGui::Text("Body Count: %u", rigidBodyCount);
+                    for (size_t i = 0; i < rigidBodies.size(); i++) {
+                        ImGui::Text("Body %zu Mass: %.2f", i, rigidBodies[i].mass);
+                    }
                 }
-                ImGui::Text("Mass: %.2f", mySphere.mass);
                 ImGui::End();
             }
             
@@ -1232,6 +1271,10 @@ private:
             vkFreeMemory(device, totalForceTorqueBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, rigidBodyStateBuffers[i], nullptr);
             vkFreeMemory(device, rigidBodyStateBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, rigidBodyInfoBuffers[i], nullptr);
+            vkFreeMemory(device, rigidBodyInfoBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, bodyIndexBuffers[i], nullptr);
+            vkFreeMemory(device, bodyIndexBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, wireframeBuffers[i], nullptr);
             vkFreeMemory(device, wireframeBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, wireframeIndexBuffers[i], nullptr);
@@ -1616,7 +1659,7 @@ private:
     }
 
     void createComputeDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 15> layoutBindings{};
+        std::array<VkDescriptorSetLayoutBinding, 17> layoutBindings{};
 
         // ubo
         layoutBindings[0].binding = 0;
@@ -1722,6 +1765,20 @@ private:
         layoutBindings[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         layoutBindings[14].pImmutableSamplers = nullptr;
         layoutBindings[14].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // rigidBodyInfo
+        layoutBindings[15].binding = 15;
+        layoutBindings[15].descriptorCount = 1;
+        layoutBindings[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[15].pImmutableSamplers = nullptr;
+        layoutBindings[15].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // bodyIndex
+        layoutBindings[16].binding = 16;
+        layoutBindings[16].descriptorCount = 1;
+        layoutBindings[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[16].pImmutableSamplers = nullptr;
+        layoutBindings[16].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -2990,103 +3047,187 @@ private:
 
         // Lagrangian Points - generate based on shape
         {
+            if (rigidBodies.empty()) {
+                RigidBody body1;
+                body1.shape = RigidBodyShape::MESH;
+                body1.meshFilePath = "models/fan_pointcloud.glb";
+                body1.meshScale = 40.0f;
+                body1.meshCoordSystem = 1;
+                body1.rho = 1.0f;
+                body1.position = glm::vec3(Nx / 2.0f - 30.0f, Ny / 2.0f, Nz / 2.0f);
+                body1.orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+                body1.linear_velocity = glm::vec3(0.0f);
+                body1.angular_velocity = glm::vec3(0.0f, 0.02f, 0.0f);
+                body1.isManualControl = true;
+                body1.manualLinVel[0] = 0.0f;
+                body1.manualLinVel[1] = 0.0f;
+                body1.manualLinVel[2] = 0.0f;
+                body1.manualAngVel[0] = 0.0f;
+                body1.manualAngVel[1] = 0.02f;
+                body1.manualAngVel[2] = 0.0f;
+                rigidBodies.push_back(body1);
+
+                RigidBody body2;
+                body2.shape = RigidBodyShape::SPHERE;
+                body2.radius = 15.0f;
+                body2.rho = 1.0f;
+                body2.position = glm::vec3(Nx / 2.0f + 30.0f, Ny / 2.0f, Nz / 2.0f);
+                body2.orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+                body2.linear_velocity = glm::vec3(0.0f);
+                body2.angular_velocity = glm::vec3(0.0f, 0.0f, -0.03f);
+                body2.isManualControl = true;
+                body2.manualLinVel[0] = 0.0f;
+                body2.manualLinVel[1] = 0.0f;
+                body2.manualLinVel[2] = 0.0f;
+                body2.manualAngVel[0] = 0.0f;
+                body2.manualAngVel[1] = 0.0f;
+                body2.manualAngVel[2] = -0.03f;
+                body2.updateInertia();
+                rigidBodies.push_back(body2);
+            }
+            rigidBodyCount = static_cast<uint32_t>(rigidBodies.size());
+            
             std::vector<glm::vec3> positions;
             std::vector<float> skValues;
             std::vector<glm::vec3> normals;
+            std::vector<uint32_t> bodyIndices;
             
             float target_spacing = 0.5f;
             
-            switch (mySphere.shape) {
-                case RigidBodyShape::SPHERE:
-                    generateSphere(mySphere.radius, target_spacing, positions, skValues);
-                    break;
-                case RigidBodyShape::BOX:
-                    generateBox(mySphere.boxSize, target_spacing, positions, skValues);
-                    break;
-                case RigidBodyShape::CYLINDER:
-                    generateCylinder(mySphere.cylinderRadius, mySphere.cylinderHeight, target_spacing, positions, skValues);
-                    break;
-                case RigidBodyShape::MESH:
-                    {
-                        std::string meshPath = mySphere.meshFilePath;
-                        
-                        bool loaded = false;
-                        if (meshPath.find(".glb") != std::string::npos || meshPath.find(".GLB") != std::string::npos) {
-                            loaded = loadMeshFromGLB(meshPath, positions, skValues, normals);
-                        } else if (meshPath.find(".bin") != std::string::npos || meshPath.find(".BIN") != std::string::npos) {
-                            loaded = loadMeshFromBIN(meshPath, positions, skValues, normals);
-                        } else {
-                            std::string csvPath = meshPath;
-                            size_t dotPos = meshPath.find_last_of('.');
-                            if (dotPos != std::string::npos) {
-                                csvPath = meshPath.substr(0, dotPos) + ".csv";
-                            }
-                            loaded = loadMeshFromCSV(csvPath, positions, skValues, normals);
-                        }
-                        
-                        if (!loaded || positions.empty()) {
-                            std::cerr << "Failed to load mesh data, falling back to BOX shape" << std::endl;
-                            generateBox(mySphere.boxSize, target_spacing, positions, skValues);
-                        } else {
-                            if (mySphere.meshCoordSystem == 1) {
-                                std::cout << "Applying coordinate transform: Y-up (OpenGL) -> Z-up (Vulkan)" << std::endl;
-                                for (auto& pos : positions) {
-                                    float tmp = pos.y;
-                                    pos.y = pos.z;
-                                    pos.z = tmp;
+            for (uint32_t bodyIdx = 0; bodyIdx < rigidBodyCount; bodyIdx++) {
+                const RigidBody& body = rigidBodies[bodyIdx];
+                size_t startIdx = positions.size();
+                
+                switch (body.shape) {
+                    case RigidBodyShape::SPHERE:
+                        generateSphere(body.radius, target_spacing, positions, skValues);
+                        break;
+                    case RigidBodyShape::BOX:
+                        generateBox(body.boxSize, target_spacing, positions, skValues);
+                        break;
+                    case RigidBodyShape::CYLINDER:
+                        generateCylinder(body.cylinderRadius, body.cylinderHeight, target_spacing, positions, skValues);
+                        break;
+                    case RigidBodyShape::MESH:
+                        {
+                            std::string meshPath = body.meshFilePath;
+                            
+                            bool loaded = false;
+                            std::vector<glm::vec3> meshPositions;
+                            std::vector<float> meshSkValues;
+                            std::vector<glm::vec3> meshNormals;
+                            
+                            if (meshPath.find(".glb") != std::string::npos || meshPath.find(".GLB") != std::string::npos) {
+                                loaded = loadMeshFromGLB(meshPath, meshPositions, meshSkValues, meshNormals);
+                            } else if (meshPath.find(".bin") != std::string::npos || meshPath.find(".BIN") != std::string::npos) {
+                                loaded = loadMeshFromBIN(meshPath, meshPositions, meshSkValues, meshNormals);
+                            } else {
+                                std::string csvPath = meshPath;
+                                size_t dotPos = meshPath.find_last_of('.');
+                                if (dotPos != std::string::npos) {
+                                    csvPath = meshPath.substr(0, dotPos) + ".csv";
                                 }
-                                for (auto& norm : normals) {
-                                    float tmp = norm.y;
-                                    norm.y = norm.z;
-                                    norm.z = tmp;
-                                }
-                            } else if (mySphere.meshCoordSystem == 2) {
-                                std::cout << "Applying coordinate transform: Z-up -> Y-up" << std::endl;
-                                for (auto& pos : positions) {
-                                    float tmp = pos.z;
-                                    pos.z = pos.y;
-                                    pos.y = tmp;
-                                }
-                                for (auto& norm : normals) {
-                                    float tmp = norm.z;
-                                    norm.z = norm.y;
-                                    norm.y = tmp;
-                                }
+                                loaded = loadMeshFromCSV(csvPath, meshPositions, meshSkValues, meshNormals);
                             }
                             
-                            float scale = mySphere.meshScale;
-                            for (auto& pos : positions) {
-                                pos *= scale;
-                            }
-                            for (auto& sk : skValues) {
-                                sk *= scale * scale;
+                            if (!loaded || meshPositions.empty()) {
+                                std::cerr << "Failed to load mesh data for body " << bodyIdx << ", falling back to BOX shape" << std::endl;
+                                generateBox(body.boxSize, target_spacing, meshPositions, meshSkValues);
+                            } else {
+                                if (body.meshCoordSystem == 1) {
+                                    std::cout << "Applying coordinate transform: Y-up (OpenGL) -> Z-up (Vulkan)" << std::endl;
+                                    for (auto& pos : meshPositions) {
+                                        float tmp = pos.y;
+                                        pos.y = pos.z;
+                                        pos.z = tmp;
+                                    }
+                                    for (auto& norm : meshNormals) {
+                                        float tmp = norm.y;
+                                        norm.y = norm.z;
+                                        norm.z = tmp;
+                                    }
+                                } else if (body.meshCoordSystem == 2) {
+                                    std::cout << "Applying coordinate transform: Z-up -> Y-up" << std::endl;
+                                    for (auto& pos : meshPositions) {
+                                        float tmp = pos.z;
+                                        pos.z = pos.y;
+                                        pos.y = tmp;
+                                    }
+                                    for (auto& norm : meshNormals) {
+                                        float tmp = norm.z;
+                                        norm.z = norm.y;
+                                        norm.y = tmp;
+                                    }
+                                }
+                                
+                                float scale = body.meshScale;
+                                for (auto& pos : meshPositions) {
+                                    pos *= scale;
+                                }
+                                for (auto& sk : meshSkValues) {
+                                    sk *= scale * scale;
+                                }
+                                
+                                rigidBodies[bodyIdx].meshBoundingBoxMin = meshPositions[0];
+                                rigidBodies[bodyIdx].meshBoundingBoxMax = meshPositions[0];
+                                for (const auto& pos : meshPositions) {
+                                    rigidBodies[bodyIdx].meshBoundingBoxMin = glm::min(rigidBodies[bodyIdx].meshBoundingBoxMin, pos);
+                                    rigidBodies[bodyIdx].meshBoundingBoxMax = glm::max(rigidBodies[bodyIdx].meshBoundingBoxMax, pos);
+                                }
+                                std::cout << "Body " << bodyIdx << " mesh bounding box (scaled): ("
+                                          << rigidBodies[bodyIdx].meshBoundingBoxMin.x << ", " 
+                                          << rigidBodies[bodyIdx].meshBoundingBoxMin.y << ", " 
+                                          << rigidBodies[bodyIdx].meshBoundingBoxMin.z << ") to ("
+                                          << rigidBodies[bodyIdx].meshBoundingBoxMax.x << ", " 
+                                          << rigidBodies[bodyIdx].meshBoundingBoxMax.y << ", " 
+                                          << rigidBodies[bodyIdx].meshBoundingBoxMax.z << ")" << std::endl;
+                                float totalArea = 0.0f;
+                                for (float sk : meshSkValues) totalArea += sk;
+                                std::cout << "Total surface area from sk values (scaled): " << totalArea << std::endl;
+                                rigidBodies[bodyIdx].updateInertia();
                             }
                             
-                            mySphere.meshBoundingBoxMin = positions[0];
-                            mySphere.meshBoundingBoxMax = positions[0];
-                            for (const auto& pos : positions) {
-                                mySphere.meshBoundingBoxMin = glm::min(mySphere.meshBoundingBoxMin, pos);
-                                mySphere.meshBoundingBoxMax = glm::max(mySphere.meshBoundingBoxMax, pos);
-                            }
-                            std::cout << "Mesh bounding box (scaled): ("
-                                      << mySphere.meshBoundingBoxMin.x << ", " 
-                                      << mySphere.meshBoundingBoxMin.y << ", " 
-                                      << mySphere.meshBoundingBoxMin.z << ") to ("
-                                      << mySphere.meshBoundingBoxMax.x << ", " 
-                                      << mySphere.meshBoundingBoxMax.y << ", " 
-                                      << mySphere.meshBoundingBoxMax.z << ")" << std::endl;
-                            float totalArea = 0.0f;
-                            for (float sk : skValues) totalArea += sk;
-                            std::cout << "Total surface area from sk values (scaled): " << totalArea << std::endl;
-                            mySphere.updateInertia();
+                            positions.insert(positions.end(), meshPositions.begin(), meshPositions.end());
+                            skValues.insert(skValues.end(), meshSkValues.begin(), meshSkValues.end());
                         }
-                    }
-                    break;
+                        break;
+                }
+                
+                size_t endIdx = positions.size();
+                for (size_t i = startIdx; i < endIdx; i++) {
+                    bodyIndices.push_back(bodyIdx);
+                }
             }
             
-            if (mySphere.shape == RigidBodyShape::MESH && positions.empty()) {
-                mySphere.shape = RigidBodyShape::BOX;
-                mySphere.updateInertia();
+            for (uint32_t bodyIdx = 0; bodyIdx < rigidBodyCount; bodyIdx++) {
+                if (rigidBodies[bodyIdx].shape == RigidBodyShape::MESH) {
+                    size_t startIdx = 0;
+                    for (uint32_t j = 0; j < bodyIdx; j++) {
+                        RigidBody& prevBody = rigidBodies[j];
+                        switch (prevBody.shape) {
+                            case RigidBodyShape::SPHERE:
+                                { std::vector<glm::vec3> tmpPos; std::vector<float> tmpSk; generateSphere(prevBody.radius, target_spacing, tmpPos, tmpSk); startIdx += tmpPos.size(); }
+                                break;
+                            case RigidBodyShape::BOX:
+                                { std::vector<glm::vec3> tmpPos; std::vector<float> tmpSk; generateBox(prevBody.boxSize, target_spacing, tmpPos, tmpSk); startIdx += tmpPos.size(); }
+                                break;
+                            case RigidBodyShape::CYLINDER:
+                                { std::vector<glm::vec3> tmpPos; std::vector<float> tmpSk; generateCylinder(prevBody.cylinderRadius, prevBody.cylinderHeight, target_spacing, tmpPos, tmpSk); startIdx += tmpPos.size(); }
+                                break;
+                            case RigidBodyShape::MESH:
+                                break;
+                        }
+                    }
+                    bool hasPoints = false;
+                    for (size_t i = startIdx; i < bodyIndices.size() && bodyIndices[i] == bodyIdx; i++) {
+                        hasPoints = true;
+                        break;
+                    }
+                    if (!hasPoints) {
+                        rigidBodies[bodyIdx].shape = RigidBodyShape::BOX;
+                        rigidBodies[bodyIdx].updateInertia();
+                    }
+                }
             }
             
             lagrangianPointCount = static_cast<uint32_t>(positions.size());
@@ -3194,18 +3335,16 @@ private:
             vkDestroyBuffer(device, stagingBuffer, nullptr);
             vkFreeMemory(device, stagingBufferMemory, nullptr);
 
-            VkDeviceSize totalForceTorqueBufferSize = sizeof(TotalForceTorque);
+            VkDeviceSize totalForceTorqueBufferSize = sizeof(glm::vec4) * 2 * rigidBodyCount;
             totalForceTorqueBuffers.resize(MAX_FRAMES_IN_FLIGHT);
             totalForceTorqueBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
             totalForceTorqueBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
 
-            TotalForceTorque initialForceTorque{};
-            initialForceTorque.total_force = glm::vec4(0.0f);
-            initialForceTorque.total_torque = glm::vec4(0.0f);
+            std::vector<glm::vec4> initialForceTorque(rigidBodyCount * 2, glm::vec4(0.0f));
 
             createBuffer(totalForceTorqueBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
             vkMapMemory(device, stagingBufferMemory, 0, totalForceTorqueBufferSize, 0, &data);
-            memcpy(data, &initialForceTorque, (size_t)totalForceTorqueBufferSize);
+            memcpy(data, initialForceTorque.data(), (size_t)totalForceTorqueBufferSize);
             vkUnmapMemory(device, stagingBufferMemory);
 
             for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -3217,28 +3356,62 @@ private:
             vkDestroyBuffer(device, stagingBuffer, nullptr);
             vkFreeMemory(device, stagingBufferMemory, nullptr);
 
-            VkDeviceSize rigidBodyStateBufferSize = sizeof(RigidBodyState);
+            VkDeviceSize rigidBodyStateBufferSize = sizeof(RigidBodyState) * rigidBodyCount;
             rigidBodyStateBuffers.resize(MAX_FRAMES_IN_FLIGHT);
             rigidBodyStateBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
 
-            RigidBodyState initialRigidBodyState{};
-            initialRigidBodyState.position = glm::vec4(mySphere.position, 1.0f);
-            initialRigidBodyState.orientation = glm::vec4(mySphere.orientation.x, mySphere.orientation.y, mySphere.orientation.z, mySphere.orientation.w);
-            initialRigidBodyState.lin_vel = glm::vec4(mySphere.linear_velocity, 0.0f);
-            initialRigidBodyState.ang_vel = glm::vec4(mySphere.angular_velocity, 0.0f);
-            glm::mat4 M = glm::mat4(1.0f);
-            M = glm::translate(M, mySphere.position);
-            M = M * glm::mat4_cast(mySphere.orientation);
-            initialRigidBodyState.modelMatrix = M;
+            std::vector<RigidBodyState> initialRigidBodyStates(rigidBodyCount);
+            for (uint32_t i = 0; i < rigidBodyCount; i++) {
+                initialRigidBodyStates[i] = rigidBodies[i].getRigidBodyState();
+            }
 
             createBuffer(rigidBodyStateBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
             vkMapMemory(device, stagingBufferMemory, 0, rigidBodyStateBufferSize, 0, &data);
-            memcpy(data, &initialRigidBodyState, (size_t)rigidBodyStateBufferSize);
+            memcpy(data, initialRigidBodyStates.data(), (size_t)rigidBodyStateBufferSize);
             vkUnmapMemory(device, stagingBufferMemory);
 
             for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-                createBuffer(rigidBodyStateBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, rigidBodyStateBuffers[i], rigidBodyStateBuffersMemory[i]);
+                createBuffer(rigidBodyStateBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, rigidBodyStateBuffers[i], rigidBodyStateBuffersMemory[i]);
                 copyBuffer(stagingBuffer, rigidBodyStateBuffers[i], rigidBodyStateBufferSize);
+            }
+
+            vkDestroyBuffer(device, stagingBuffer, nullptr);
+            vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+            VkDeviceSize rigidBodyInfoBufferSize = sizeof(RigidBodyInfo) * rigidBodyCount;
+            rigidBodyInfoBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            rigidBodyInfoBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+
+            std::vector<RigidBodyInfo> rigidBodyInfos(rigidBodyCount);
+            for (uint32_t i = 0; i < rigidBodyCount; i++) {
+                rigidBodyInfos[i] = rigidBodies[i].getRigidBodyInfo();
+            }
+
+            createBuffer(rigidBodyInfoBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+            vkMapMemory(device, stagingBufferMemory, 0, rigidBodyInfoBufferSize, 0, &data);
+            memcpy(data, rigidBodyInfos.data(), (size_t)rigidBodyInfoBufferSize);
+            vkUnmapMemory(device, stagingBufferMemory);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                createBuffer(rigidBodyInfoBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, rigidBodyInfoBuffers[i], rigidBodyInfoBuffersMemory[i]);
+                copyBuffer(stagingBuffer, rigidBodyInfoBuffers[i], rigidBodyInfoBufferSize);
+            }
+
+            vkDestroyBuffer(device, stagingBuffer, nullptr);
+            vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+            VkDeviceSize bodyIndexBufferSize = sizeof(uint32_t) * lagrangianPointCount;
+            bodyIndexBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            bodyIndexBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+
+            createBuffer(bodyIndexBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+            vkMapMemory(device, stagingBufferMemory, 0, bodyIndexBufferSize, 0, &data);
+            memcpy(data, bodyIndices.data(), (size_t)bodyIndexBufferSize);
+            vkUnmapMemory(device, stagingBufferMemory);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                createBuffer(bodyIndexBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, bodyIndexBuffers[i], bodyIndexBuffersMemory[i]);
+                copyBuffer(stagingBuffer, bodyIndexBuffers[i], bodyIndexBufferSize);
             }
 
             vkDestroyBuffer(device, stagingBuffer, nullptr);
@@ -3659,7 +3832,7 @@ private:
             uniformBufferInfo.offset = 0;
             uniformBufferInfo.range = sizeof(SimulateUBO);
 
-            std::array<VkWriteDescriptorSet, 15> descriptorWrites{};
+            std::array<VkWriteDescriptorSet, 17> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = computeDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -3814,7 +3987,7 @@ private:
             VkDescriptorBufferInfo totalForceTorqueBufferInfo{};
             totalForceTorqueBufferInfo.buffer = totalForceTorqueBuffers[i];
             totalForceTorqueBufferInfo.offset = 0;
-            totalForceTorqueBufferInfo.range = sizeof(TotalForceTorque);
+            totalForceTorqueBufferInfo.range = sizeof(glm::vec4) * 2 * rigidBodyCount;
 
             descriptorWrites[12].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[12].dstSet = computeDescriptorSets[i];
@@ -3827,7 +4000,7 @@ private:
             VkDescriptorBufferInfo rigidBodyStateBufferInfo{};
             rigidBodyStateBufferInfo.buffer = rigidBodyStateBuffers[i];
             rigidBodyStateBufferInfo.offset = 0;
-            rigidBodyStateBufferInfo.range = sizeof(RigidBodyState);
+            rigidBodyStateBufferInfo.range = sizeof(RigidBodyState) * rigidBodyCount;
 
             descriptorWrites[13].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[13].dstSet = computeDescriptorSets[i];
@@ -3849,6 +4022,32 @@ private:
             descriptorWrites[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[14].descriptorCount = 1;
             descriptorWrites[14].pBufferInfo = &skBufferInfo;
+
+            VkDescriptorBufferInfo rigidBodyInfoBufferInfo{};
+            rigidBodyInfoBufferInfo.buffer = rigidBodyInfoBuffers[i];
+            rigidBodyInfoBufferInfo.offset = 0;
+            rigidBodyInfoBufferInfo.range = sizeof(RigidBodyInfo) * rigidBodyCount;
+
+            descriptorWrites[15].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[15].dstSet = computeDescriptorSets[i];
+            descriptorWrites[15].dstBinding = 15;
+            descriptorWrites[15].dstArrayElement = 0;
+            descriptorWrites[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[15].descriptorCount = 1;
+            descriptorWrites[15].pBufferInfo = &rigidBodyInfoBufferInfo;
+
+            VkDescriptorBufferInfo bodyIndexBufferInfo{};
+            bodyIndexBufferInfo.buffer = bodyIndexBuffers[i];
+            bodyIndexBufferInfo.offset = 0;
+            bodyIndexBufferInfo.range = sizeof(uint32_t) * lagrangianPointCount;
+
+            descriptorWrites[16].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[16].dstSet = computeDescriptorSets[i];
+            descriptorWrites[16].dstBinding = 16;
+            descriptorWrites[16].dstArrayElement = 0;
+            descriptorWrites[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[16].descriptorCount = 1;
+            descriptorWrites[16].pBufferInfo = &bodyIndexBufferInfo;
 
             vkUpdateDescriptorSets(device, descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
         }
@@ -4194,7 +4393,7 @@ private:
         if (enIBM) {
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, rigidBodySolverPipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
-            vkCmdDispatch(commandBuffer, 1, 1, 1);
+            vkCmdDispatch(commandBuffer, rigidBodyCount, 1, 1);
             vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
 
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, updatePositionsPipeline);
@@ -4244,7 +4443,7 @@ private:
                 vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
             }
 
-            vkCmdFillBuffer(commandBuffer, totalForceTorqueBuffers[currentFrame], 0, sizeof(TotalForceTorque), 0);
+            vkCmdFillBuffer(commandBuffer, totalForceTorqueBuffers[currentFrame], 0, sizeof(glm::vec4) * 2 * rigidBodyCount, 0);
             VkMemoryBarrier fillForceTorqueBarrier{};
             fillForceTorqueBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
             fillForceTorqueBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -4359,50 +4558,7 @@ private:
             ubo.render_mode = render_mode;
             ubo.lagrangianPointCount = lagrangianPointCount;
             ubo.couplingStrength = couplingStrength;
-            ubo.mass = mySphere.mass;
-            ubo.inv_mass = mySphere.inv_mass;
-            ubo.inertia_scalar = mySphere.inertiaTensor[0][0];
-            ubo.inv_inertia = mySphere.invInertiaTensor[0][0];
-            ubo.radius = mySphere.radius;
-            ubo.volume = mySphere.volume;
-            ubo.manualMode = isManualControl ? 1 : 0;
-            float travel_distance = 48.0f;
-            float max_vel = 0.2f;
-            int accel_frames = 60;
-            int pause_frames = 30;
-            float a_point = Ny / 2.0f - travel_distance / 2.0f;
-            float b_point = Ny / 2.0f + travel_distance / 2.0f;
-            auto smootherstep = [](float t) { return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f); };
-            float accel_distance = max_vel * accel_frames * 0.5f;
-            float cruise_distance = travel_distance - 2.0f * accel_distance;
-            int cruise_frames = (int)std::max(1.0f, cruise_distance / max_vel);
-            int half_cycle = accel_frames + cruise_frames + accel_frames + pause_frames;
-            int full_cycle = half_cycle * 2;
-            int t_mod = currentTime % full_cycle;
-            float vy = 0.0f;
-            if (t_mod < accel_frames) {
-                float t = smootherstep((float)t_mod / accel_frames);
-                vy = t * max_vel;
-            } else if (t_mod < accel_frames + cruise_frames) {
-                vy = max_vel;
-            } else if (t_mod < accel_frames * 2 + cruise_frames) {
-                float t = smootherstep(1.0f - (float)(t_mod - accel_frames - cruise_frames) / accel_frames);
-                vy = t * max_vel;
-            } else if (t_mod < half_cycle) {
-                vy = 0.0f;
-            } else if (t_mod < half_cycle + accel_frames) {
-                float t = smootherstep((float)(t_mod - half_cycle) / accel_frames);
-                vy = -t * max_vel;
-            } else if (t_mod < half_cycle + accel_frames + cruise_frames) {
-                vy = -max_vel;
-            } else if (t_mod < half_cycle + accel_frames * 2 + cruise_frames) {
-                float t = smootherstep(1.0f - (float)(t_mod - half_cycle - accel_frames - cruise_frames) / accel_frames);
-                vy = -t * max_vel;
-            } else {
-                vy = 0.0f;
-            }
-            ubo.manualLinVel = glm::vec4(manualLinVel[0], manualLinVel[1], manualLinVel[2], 0.0f);
-            ubo.manualAngVel = glm::vec4(manualAngVel[0], -0.02f, manualAngVel[2], 0.0f);
+            ubo.rigidBodyCount = rigidBodyCount;
             ubo.useEmitter = useEmitter;
             ubo.spawnRate = spawnRate;
             ubo.emitterPos = glm::vec4(emitterPos[0], emitterPos[1], emitterPos[2], emitterPos[3]);

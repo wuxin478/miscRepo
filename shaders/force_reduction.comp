@@ -38,15 +38,7 @@ layout (std430, binding = 0) uniform SimulateUBO {
     uint fixed_point_iteration;
     uint lagrangianPointCount;
     float couplingStrength;
-    float mass;
-    float inv_mass;
-    float inertia_scalar;
-    float inv_inertia;
-    float radius;
-    float volume;
-    uint manualMode;
-    vec4 manualLinVel;
-    vec4 manualAngVel;
+    uint rigidBodyCount;
     uint useEmitter;
     float spawnRate;
     vec4 emitterPos;
@@ -62,12 +54,15 @@ layout(std430, binding = 9) buffer LagrangianPointsRest {
 };
 
 layout(std430, binding = 12) buffer TotalForceTorqueBuffer {
-    vec4 total_force;
-    vec4 total_torque;
+    vec4 total_force_torque[];
 };
 
-layout(std430, binding = 13) buffer RigidBodyBuffer {
-    RigidBodyState body;
+layout(std430, binding = 13) buffer RigidBodyStateBuffer {
+    RigidBodyState bodies[];
+};
+
+layout(std430, binding = 16) buffer BodyIndexBuffer {
+    uint bodyIndices[];
 };
 
 #define WORKGROUP_SIZE 256
@@ -75,6 +70,7 @@ layout (local_size_x = WORKGROUP_SIZE, local_size_y = 1, local_size_z = 1) in;
 
 shared vec3 s_force[WORKGROUP_SIZE];
 shared vec3 s_torque[WORKGROUP_SIZE];
+shared uint s_bodyIdx[WORKGROUP_SIZE];
 
 void main() {
     uint local_id = gl_LocalInvocationID.x;
@@ -82,35 +78,41 @@ void main() {
 
     vec3 force_on_point = vec3(0.0);
     vec3 torque_on_point = vec3(0.0);
+    uint bodyIdx = 0xFFFFFFFFu;
 
     if (global_id < ubo.lagrangianPointCount) {
+        bodyIdx = bodyIndices[global_id];
         force_on_point = -lagrangianData[global_id].force.xyz;
         
         vec3 r_rest = lagrangianPoints_Rest[global_id].position.xyz;
-        vec3 r_world = mat3(body.modelMatrix) * r_rest; 
+        vec3 r_world = mat3(bodies[bodyIdx].modelMatrix) * r_rest; 
         torque_on_point = cross(r_world, force_on_point);
     }
 
     s_force[local_id] = force_on_point;
     s_torque[local_id] = torque_on_point;
+    s_bodyIdx[local_id] = bodyIdx;
 
     barrier();
 
     for (uint s = WORKGROUP_SIZE / 2; s > 0; s >>= 1) {
         if (local_id < s) {
-            s_force[local_id] += s_force[local_id + s];
-            s_torque[local_id] += s_torque[local_id + s];
+            if (s_bodyIdx[local_id] == s_bodyIdx[local_id + s]) {
+                s_force[local_id] += s_force[local_id + s];
+                s_torque[local_id] += s_torque[local_id + s];
+            }
         }
         barrier();
     }
 
-    if (local_id == 0) {
-        atomicAdd(total_force.x, s_force[0].x);
-        atomicAdd(total_force.y, s_force[0].y);
-        atomicAdd(total_force.z, s_force[0].z);
+    if (local_id == 0 && s_bodyIdx[0] != 0xFFFFFFFFu && s_bodyIdx[0] < ubo.rigidBodyCount) {
+        uint idx = s_bodyIdx[0];
+        atomicAdd(total_force_torque[idx * 2].x, s_force[0].x);
+        atomicAdd(total_force_torque[idx * 2].y, s_force[0].y);
+        atomicAdd(total_force_torque[idx * 2].z, s_force[0].z);
 
-        atomicAdd(total_torque.x, s_torque[0].x);
-        atomicAdd(total_torque.y, s_torque[0].y);
-        atomicAdd(total_torque.z, s_torque[0].z);
+        atomicAdd(total_force_torque[idx * 2 + 1].x, s_torque[0].x);
+        atomicAdd(total_force_torque[idx * 2 + 1].y, s_torque[0].y);
+        atomicAdd(total_force_torque[idx * 2 + 1].z, s_torque[0].z);
     }
 }

@@ -9,6 +9,18 @@ struct RigidBodyState {
     mat4 modelMatrix;
 };
 
+struct RigidBodyInfo {
+    float mass;
+    float inv_mass;
+    float inv_inertia;
+    float volume;
+    uint manualMode;
+    vec4 manualLinVel;
+    vec4 manualAngVel;
+};
+
+#define MAX_RIGID_BODIES 16
+
 layout (std430, binding = 0) uniform SimulateUBO {
     uint Nx;
     uint Ny;
@@ -28,15 +40,7 @@ layout (std430, binding = 0) uniform SimulateUBO {
     uint fixed_point_iteration;
     uint lagrangianPointCount;
     float couplingStrength;
-    float mass;
-    float inv_mass;
-    float inertia_scalar;
-    float inv_inertia;
-    float radius;
-    float volume;
-    uint manualMode;
-    vec4 manualLinVel;
-    vec4 manualAngVel;
+    uint rigidBodyCount;
     uint useEmitter;
     float spawnRate;
     vec4 emitterPos;
@@ -44,15 +48,18 @@ layout (std430, binding = 0) uniform SimulateUBO {
 } ubo;
 
 layout(std430, binding = 12) buffer TotalForceTorqueBuffer {
-    vec4 total_force;
-    vec4 total_torque;
+    vec4 total_force_torque[];
 };
 
-layout(std430, binding = 13) buffer RigidBodyBuffer {
-    RigidBodyState body;
+layout(std430, binding = 13) buffer RigidBodyStateBuffer {
+    RigidBodyState bodies[];
 };
 
-layout (local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(std430, binding = 15) buffer RigidBodyInfoBuffer {
+    RigidBodyInfo bodyInfos[];
+};
+
+layout (local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 mat4 build_model_matrix(vec3 pos, vec4 q) {
     float x = q.x, y = q.y, z = q.z, w = q.w;
@@ -67,23 +74,28 @@ mat4 build_model_matrix(vec3 pos, vec4 q) {
 }
 
 void main() {
+    uint bodyIdx = gl_GlobalInvocationID.x;
+    if (bodyIdx >= ubo.rigidBodyCount) return;
+
     float dt = 1.0;
+    RigidBodyState body = bodies[bodyIdx];
+    RigidBodyInfo info = bodyInfos[bodyIdx];
 
-    if (ubo.manualMode == 1) {
-        body.lin_vel.xyz = ubo.manualLinVel.xyz;
-        body.ang_vel.xyz = ubo.manualAngVel.xyz;
+    vec3 total_force = total_force_torque[bodyIdx * 2].xyz * (1.0 / ubo.couplingStrength);
+    vec3 total_torque = total_force_torque[bodyIdx * 2 + 1].xyz * (1.0 / ubo.couplingStrength);
+
+    if (info.manualMode == 1) {
+        body.lin_vel.xyz = info.manualLinVel.xyz;
+        body.ang_vel.xyz = info.manualAngVel.xyz;
     } else {
-        vec3 F_fluid = total_force.xyz * (1.0 / ubo.couplingStrength);
-        vec3 T_fluid = total_torque.xyz * (1.0 / ubo.couplingStrength);
+        vec3 gravity_force = vec3(0.0, 0.0, -0.001 * info.mass);
+        vec3 buoyancy_force = vec3(0.0, 0.0, 0.001 * info.volume);
+        vec3 total_force_vec = total_force + gravity_force + buoyancy_force;
 
-        vec3 gravity_force = vec3(0.0, 0.0, -0.001 * ubo.mass);
-        vec3 buoyancy_force = vec3(0.0, 0.0, 0.001 * ubo.volume);
-        vec3 total_force_vec = F_fluid + gravity_force + buoyancy_force;
-
-        vec3 acc = total_force_vec * ubo.inv_mass;
+        vec3 acc = total_force_vec * info.inv_mass;
         body.lin_vel.xyz = (body.lin_vel.xyz + acc * dt) * 0.999;
 
-        vec3 ang_acc = T_fluid * ubo.inv_inertia;
+        vec3 ang_acc = total_torque * info.inv_inertia;
         body.ang_vel.xyz = (body.ang_vel.xyz + ang_acc * dt) * 0.999;
     }
 
@@ -115,4 +127,6 @@ void main() {
     body.position.z = clamp(body.position.z, margin, float(ubo.Nz) - margin);
 
     body.modelMatrix = build_model_matrix(body.position.xyz, body.orientation);
+
+    bodies[bodyIdx] = body;
 }

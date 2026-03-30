@@ -41,15 +41,7 @@ layout (std430, binding = 0) uniform SimulateUBO {
     uint fixed_point_iteration;
     uint lagrangianPointCount;
     float couplingStrength;
-    float mass;
-    float inv_mass;
-    float inertia_scalar;
-    float inv_inertia;
-    float radius;
-    float volume;
-    uint manualMode;
-    vec4 manualLinVel;
-    vec4 manualAngVel;
+    uint rigidBodyCount;
     uint useEmitter;
     float spawnRate;
     vec4 emitterPos;
@@ -72,19 +64,26 @@ layout(std430, binding = 10) buffer LagrangianPointsPrev {
     LagrangianPoint lagrangianPoints_Prev[];
 };
 
-layout(std430, binding = 13) buffer RigidBodyBuffer {
-    RigidBodyState body;
+layout(std430, binding = 13) buffer RigidBodyStateBuffer {
+    RigidBodyState bodies[];
+};
+
+layout(std430, binding = 16) buffer BodyIndexBuffer {
+    uint bodyIndices[];
 };
 
 layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 void main() {
     uint k = gl_GlobalInvocationID.x;
-    if (k >= ubo.particleCount) return;
+    if (k >= ubo.lagrangianPointCount) return;
+
+    uint bodyIdx = bodyIndices[k];
+    if (bodyIdx >= ubo.rigidBodyCount) return;
 
     vec4 rest_pos = lagrangianPoints_Rest[k].position;
 
-    vec4 current_world_pos = body.modelMatrix * rest_pos;
+    vec4 current_world_pos = bodies[bodyIdx].modelMatrix * rest_pos;
 
     vec3 prev_world_pos = lagrangianPoints_Prev[k].position.xyz;
 

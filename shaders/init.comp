@@ -105,15 +105,7 @@ layout (std430, binding = 0) uniform SimulateUBO {
     uint fixed_point_iteration;
     uint lagrangianPointCount;
     float couplingStrength;
-    float mass;
-    float inv_mass;
-    float inertia_scalar;
-    float inv_inertia;
-    float radius;
-    float volume;
-    uint manualMode;
-    vec4 manualLinVel;
-    vec4 manualAngVel;
+    uint rigidBodyCount;
     uint useEmitter;
     float spawnRate;
     vec4 emitterPos;
