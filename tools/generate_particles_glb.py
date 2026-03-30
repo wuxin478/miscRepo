@@ -99,6 +99,6 @@ def generate_professional_ibm_glb(input_path, dx):
 
 if __name__ == "__main__":
     # 配置
-    INPUT = "box.glb"
-    DX = 0.05
+    INPUT = "models/fan.glb"
+    DX = 0.005
     generate_professional_ibm_glb(INPUT, DX)

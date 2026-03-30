@@ -591,15 +591,15 @@ struct RigidBody {
         boxSize = glm::vec3(40.0f, 3.0f, 25.0f);
         cylinderRadius = 10.0f;
         cylinderHeight = 20.0f;
-        meshFilePath = "models/box_pointcloud.glb";
+        meshFilePath = "models/fan_pointcloud.glb";
         meshBoundingBoxMin = glm::vec3(-1.0f);
         meshBoundingBoxMax = glm::vec3(1.0f);
-        meshScale = 20.0f;
+        meshScale = 40.0f;
         meshCoordSystem = 1;
         updateInertia();
         float travel_distance = 48.0f;
         float a_point = Ny / 2.0f - travel_distance / 2.0f;
-        position = glm::vec3(Nx / 2.0f, a_point, Nz / 2.0f);
+        position = glm::vec3(Nx / 2.0f, Ny / 2.0f, Nz / 2.0f);
         orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
         linear_velocity = glm::vec3(0.0f);
         angular_velocity = glm::vec3(0.0f, 0.0f, 0.0f);
@@ -689,7 +689,7 @@ private:
     float rigidBodyDensity = 1.0f;
     uint32_t useEmitter = 1;
     float spawnRate = 200.0f;
-    float emitterPos[4] = { Nx / 2.0f, Ny / 2.0f, 5.0f, 1.0f };
+    float emitterPos[4] = { Nx / 2.0f, 30.0f, Nz / 2.0f, 1.0f };
     float emitterVel[4] = { 0.0f, 0.0f, 0.15f, 0.0f };
 
     VkInstance instance;
@@ -3359,7 +3359,7 @@ private:
                     float dist = sqrt(dx * dx + dy * dy);
                     float maxDist = sqrt(cx * cx + cy * cy);
                     float t = std::min(dist / maxDist, 1.0f);
-                    vels[index + 2 * Nxyz] = 0.05f * (1.0f - t) + 0.05f * t;
+                    // vels[index + 2 * Nxyz] = 0.05f * (1.0f - t) + 0.05f * t;
                 }
                 else if (z == Nz - 1) {
                     // vels[index + 2 * Nxyz] = 0.0f;
@@ -3432,7 +3432,7 @@ private:
                 if (x == 0 || x == Nx - 1 || y == 0 || y == Ny - 1) {
                     flags[index] = TYPE_X;
                 } else if (z == 0) {
-                    flags[index] = TYPE_E;
+                    flags[index] = TYPE_X;
                 } else if (z == Nz - 1) {
                     flags[index] = TYPE_X;
                 }
@@ -4401,8 +4401,8 @@ private:
             } else {
                 vy = 0.0f;
             }
-            ubo.manualLinVel = glm::vec4(manualLinVel[0], vy, manualLinVel[2], 0.0f);
-            ubo.manualAngVel = glm::vec4(manualAngVel[0], manualAngVel[1], manualAngVel[2], 0.0f);
+            ubo.manualLinVel = glm::vec4(manualLinVel[0], manualLinVel[1], manualLinVel[2], 0.0f);
+            ubo.manualAngVel = glm::vec4(manualAngVel[0], -0.02f, manualAngVel[2], 0.0f);
             ubo.useEmitter = useEmitter;
             ubo.spawnRate = spawnRate;
             ubo.emitterPos = glm::vec4(emitterPos[0], emitterPos[1], emitterPos[2], emitterPos[3]);
