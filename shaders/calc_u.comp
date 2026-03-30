@@ -298,8 +298,6 @@ void apply_outflow_boundary(inout float fhn[Q], const uint nbs[Q]) {
     }
 }
 
-layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
-
 void main() 
 {
     uvec3 globalSize = gl_NumWorkGroups * gl_WorkGroupSize;
@@ -310,27 +308,49 @@ void main()
     uint flagsn_bo = flagsn & TYPE_BO;
     uint flagsn_su = flagsn & TYPE_SU; 
     
-    // 如果是纯固体或气体，不需要计算流体速度
     if(flagsn_bo == TYPE_S || flagsn_su == TYPE_G) return;
+    
+    bool is_outflow = ((flagsn & TYPE_X) != 0);
     
     uint nbs[Q];
     neighbors(index, nbs);
     
     float fhn[Q];
-    // 读取经过 Streaming 后的分布函数 (这里利用了你原有的 Esoteric-Pull 逻辑)
     load_f(index, fhn, nbs, ubo.t);
 
-    // 处理现有的运动边界条件（如果有的话）
-    if (flagsn == TYPE_MS) { 
+    if ((flagsn & TYPE_MS) == TYPE_MS) { 
         apply_moving_boundaries(fhn, nbs); 
     }
     
     float rhon, uxn, uyn, uzn; 
-    if(flagsn_bo != TYPE_E) {
-        // 核心：计算出宏观速度和密度
-        calculate_rho_u(fhn, rhon, uxn, uyn, uzn); 
+    
+    if (is_outflow) {
+        uvec3 xyz = coordinates(index);
+        uint x0, xp, xm, y0, yp, ym, z0, zp, zm;
+        calculate_indices(index, x0, xp, xm, y0, yp, ym, z0, zp, zm);
         
-        // 【关键】提前将速度和密度写回显存，供 IBM 插值读取
+        uint inner_idx = index;
+        if      (xyz.z == ubo.Nz - 1) inner_idx = x0 + y0 + zm;
+        else if (xyz.z == 0)          inner_idx = x0 + y0 + zp;
+        else if (xyz.x == ubo.Nx - 1) inner_idx = xm + y0 + z0;
+        else if (xyz.x == 0)          inner_idx = xp + y0 + z0;
+        else if (xyz.y == ubo.Ny - 1) inner_idx = x0 + ym + z0;
+        else if (xyz.y == 0)          inner_idx = x0 + yp + z0;
+        
+        rhon = rhos[inner_idx];
+        uxn  = vels[inner_idx];
+        uyn  = vels[ubo.Nxyz + inner_idx];
+        uzn  = vels[2u * ubo.Nxyz + inner_idx];
+    } else if(flagsn_bo == TYPE_E) {
+        rhon = rhos[index];
+        uxn  = vels[index];
+        uyn  = vels[ubo.Nxyz + index];
+        uzn  = vels[2u * ubo.Nxyz + index];
+    } else {
+        calculate_rho_u(fhn, rhon, uxn, uyn, uzn); 
+    }
+    
+    if(flagsn_bo != TYPE_E && !is_outflow) {
         rhos[index]             = rhon; 
         vels[index]             = uxn; 
         vels[ubo.Nxyz + index]  = uyn;
