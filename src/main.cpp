@@ -768,8 +768,6 @@ private:
     VkPipeline ibmForce1Pipeline;
     VkPipeline ibmForce2Pipeline;
     VkPipeline calcUPipeline;
-    VkPipeline updateMacroPipeline;
-    VkPipeline applyBCPipeline;
     VkPipeline updatePositionsPipeline;
     VkPipeline forceReductionPipeline;
     VkPipeline rigidBodySolverPipeline;
@@ -1228,8 +1226,6 @@ private:
         vkDestroyPipeline(device, ibmForce1Pipeline, nullptr);
         vkDestroyPipeline(device, ibmForce2Pipeline, nullptr);
         vkDestroyPipeline(device, calcUPipeline, nullptr);
-        vkDestroyPipeline(device, updateMacroPipeline, nullptr);
-        vkDestroyPipeline(device, applyBCPipeline, nullptr);
         vkDestroyPipeline(device, updatePositionsPipeline, nullptr);
         vkDestroyPipeline(device, forceReductionPipeline, nullptr);
         vkDestroyPipeline(device, rigidBodySolverPipeline, nullptr);
@@ -2592,52 +2588,6 @@ private:
             pipelineInfo.stage = computeShaderStageInfo;
 
             if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &calcUPipeline) != VK_SUCCESS) {
-                throw std::runtime_error("failed to create compute pipeline!");
-            }
-
-            vkDestroyShaderModule(device, computeShaderModule, nullptr);
-        }
-
-        {
-            auto computeShaderCode = readFile("shaders/update_macro_comp.spv");
-
-            VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
-
-            VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
-            computeShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            computeShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-            computeShaderStageInfo.module = computeShaderModule;
-            computeShaderStageInfo.pName = "main";
-
-            VkComputePipelineCreateInfo pipelineInfo{};
-            pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-            pipelineInfo.layout = computePipelineLayout;
-            pipelineInfo.stage = computeShaderStageInfo;
-
-            if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &updateMacroPipeline) != VK_SUCCESS) {
-                throw std::runtime_error("failed to create compute pipeline!");
-            }
-
-            vkDestroyShaderModule(device, computeShaderModule, nullptr);
-        }
-
-        {
-            auto computeShaderCode = readFile("shaders/apply_bc_comp.spv");
-
-            VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
-
-            VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
-            computeShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            computeShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-            computeShaderStageInfo.module = computeShaderModule;
-            computeShaderStageInfo.pName = "main";
-
-            VkComputePipelineCreateInfo pipelineInfo{};
-            pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-            pipelineInfo.layout = computePipelineLayout;
-            pipelineInfo.stage = computeShaderStageInfo;
-
-            if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &applyBCPipeline) != VK_SUCCESS) {
                 throw std::runtime_error("failed to create compute pipeline!");
             }
 
