@@ -778,6 +778,8 @@ private:
     std::vector<VkDeviceMemory> shaderStorageBuffersMemory;
     std::vector<VkBuffer> velocityBuffers;
     std::vector<VkDeviceMemory> velocityBuffersMemory;
+    std::vector<VkBuffer> tempVelBuffers;
+    std::vector<VkDeviceMemory> tempVelBuffersMemory;
     std::vector<VkBuffer> rhoBuffers;
     std::vector<VkDeviceMemory> rhoBuffersMemory;
     std::vector<VkBuffer> flagBuffers;
@@ -1243,6 +1245,8 @@ private:
             vkFreeMemory(device, renderingUBOBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, velocityBuffers[i], nullptr);
             vkFreeMemory(device, velocityBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, tempVelBuffers[i], nullptr);
+            vkFreeMemory(device, tempVelBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, rhoBuffers[i], nullptr);
             vkFreeMemory(device, rhoBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, flagBuffers[i], nullptr);
@@ -1655,7 +1659,7 @@ private:
     }
 
     void createComputeDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 17> layoutBindings{};
+        std::array<VkDescriptorSetLayoutBinding, 18> layoutBindings{};
 
         // ubo
         layoutBindings[0].binding = 0;
@@ -1775,6 +1779,13 @@ private:
         layoutBindings[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         layoutBindings[16].pImmutableSamplers = nullptr;
         layoutBindings[16].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // tempVel
+        layoutBindings[17].binding = 17;
+        layoutBindings[17].descriptorCount = 1;
+        layoutBindings[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[17].pImmutableSamplers = nullptr;
+        layoutBindings[17].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -3501,12 +3512,23 @@ private:
 
             // create velocity buffer
             for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-                createBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, velocityBuffers[i], velocityBuffersMemory[i]);
+                createBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, velocityBuffers[i], velocityBuffersMemory[i]);
                 copyBuffer(stagingBuffer, velocityBuffers[i], bufferSize);
             }
 
             vkDestroyBuffer(device, stagingBuffer, nullptr);
             vkFreeMemory(device, stagingBufferMemory, nullptr);
+        }
+
+        // tempVel
+        {
+            VkDeviceSize bufferSize = Nxyz * sizeof(float) * 3;
+            tempVelBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            tempVelBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                createBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, tempVelBuffers[i], tempVelBuffersMemory[i]);
+            }
         }
 
         // rho
@@ -3782,7 +3804,7 @@ private:
             uniformBufferInfo.offset = 0;
             uniformBufferInfo.range = sizeof(SimulateUBO);
 
-            std::array<VkWriteDescriptorSet, 17> descriptorWrites{};
+            std::array<VkWriteDescriptorSet, 18> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = computeDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -3998,6 +4020,19 @@ private:
             descriptorWrites[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[16].descriptorCount = 1;
             descriptorWrites[16].pBufferInfo = &bodyIndexBufferInfo;
+
+            VkDescriptorBufferInfo tempVelBufferInfo{};
+            tempVelBufferInfo.buffer = tempVelBuffers[i];
+            tempVelBufferInfo.offset = 0;
+            tempVelBufferInfo.range = Nxyz * sizeof(float) * 3;
+
+            descriptorWrites[17].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[17].dstSet = computeDescriptorSets[i];
+            descriptorWrites[17].dstBinding = 17;
+            descriptorWrites[17].dstArrayElement = 0;
+            descriptorWrites[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[17].descriptorCount = 1;
+            descriptorWrites[17].pBufferInfo = &tempVelBufferInfo;
 
             vkUpdateDescriptorSets(device, descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
         }
@@ -4358,6 +4393,18 @@ private:
         vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
 
         if (enIBM) {
+            VkBufferCopy copyRegion{};
+            copyRegion.srcOffset = 0;
+            copyRegion.dstOffset = 0;
+            copyRegion.size = Nxyz * sizeof(float) * 3;
+            vkCmdCopyBuffer(commandBuffer, velocityBuffers[currentFrame], tempVelBuffers[currentFrame], 1, &copyRegion);
+
+            VkMemoryBarrier copyBarrier{};
+            copyBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            copyBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            copyBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &copyBarrier, 0, nullptr, 0, nullptr);
+
             for (int i = 0; i < 5; ++i) {
                 int iteration = i;
 

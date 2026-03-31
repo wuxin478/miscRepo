@@ -154,6 +154,10 @@ layout(std430, binding = 14) buffer SkBuffer {
     float s_k_values[];
 };
 
+layout(std430, binding = 17) buffer TempVelocity {
+    float tempVels[];
+};
+
 layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 // IBM 核心：Peskin 的 4 点离散 Delta 权重函数 (基于论文定义)
@@ -215,9 +219,9 @@ void main()
 
         // 读取由 calc_u.comp 计算好的流体速度
         vec3 fluid_vel = vec3(
-            vels[fluid_index],
-            vels[ubo.Nxyz + fluid_index],
-            vels[2 * ubo.Nxyz + fluid_index]
+            tempVels[fluid_index],
+            tempVels[ubo.Nxyz + fluid_index],
+            tempVels[2 * ubo.Nxyz + fluid_index]
         );
 
         // 累加带权重的速度

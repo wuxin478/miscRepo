@@ -363,7 +363,7 @@ void main()
     }
 
     // EQUILIBRIUM BOUNDARIES
-    if(flagsn_bo!=TYPE_E && !is_outflow) { // only update fields for non-TYPE_E cells
+    if(flagsn_bo!=TYPE_E) { // only update fields for non-TYPE_E cells
         rhos[            index] = rhon; // update density field
         vels[            index] = uxn; // update velocity field
         vels[   ubo.Nxyz+index] = uyn;

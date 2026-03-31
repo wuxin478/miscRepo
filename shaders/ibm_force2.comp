@@ -150,6 +150,10 @@ layout(std430, binding = 11) buffer TempForce {
     vec4 tempForces[];
 };
 
+layout(std430, binding = 17) buffer TempVelocity {
+    float tempVels[];
+};
+
 layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 // IBM 核心：Peskin 的 4 点离散 Delta 权重函数 (基于论文定义)
@@ -218,10 +222,10 @@ void main()
             atomicAdd(bfs[ubo.Nxyz + fluid_index],    force_on_cell.y);
             atomicAdd(bfs[2 * ubo.Nxyz + fluid_index],force_on_cell.z);
         } else {
-            // 中间迭代: U_iter+1 = U_iter + Σ g(k) * w(...) -> 直接更新 vels
-            atomicAdd(vels[fluid_index],               force_on_cell.x);
-            atomicAdd(vels[ubo.Nxyz + fluid_index],    force_on_cell.y);
-            atomicAdd(vels[2 * ubo.Nxyz + fluid_index],force_on_cell.z);
+            // 中间迭代: U_iter+1 = U_iter + Σ g(k) * w(...) -> 更新 tempVels
+            atomicAdd(tempVels[fluid_index],               force_on_cell.x);
+            atomicAdd(tempVels[ubo.Nxyz + fluid_index],    force_on_cell.y);
+            atomicAdd(tempVels[2 * ubo.Nxyz + fluid_index],force_on_cell.z);
         }
     }}}
 }

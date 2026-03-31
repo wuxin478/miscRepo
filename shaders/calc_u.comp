@@ -333,16 +333,11 @@ void main()
         uxn  = vels[inner_idx];
         uyn  = vels[ubo.Nxyz + inner_idx];
         uzn  = vels[2u * ubo.Nxyz + inner_idx];
-    } else if(flagsn_bo == TYPE_E) {
-        rhon = rhos[index];
-        uxn  = vels[index];
-        uyn  = vels[ubo.Nxyz + index];
-        uzn  = vels[2u * ubo.Nxyz + index];
-    } else {
+    } else if(flagsn_bo != TYPE_E) {
         calculate_rho_u(fhn, rhon, uxn, uyn, uzn); 
     }
     
-    if(flagsn_bo != TYPE_E && !is_outflow) {
+    if(flagsn_bo != TYPE_E) {
         rhos[index]             = rhon; 
         vels[index]             = uxn; 
         vels[ubo.Nxyz + index]  = uyn;
