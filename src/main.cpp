@@ -1145,40 +1145,73 @@ private:
             
             {
                 ImGui::Begin("Rigid Body Control");
-                if (ImGui::Checkbox("Enable Manual Control", &isManualControl)) {
-                    manualLinVel[0] = manualLinVel[1] = manualLinVel[2] = 0.0f;
-                    manualAngVel[0] = manualAngVel[1] = manualAngVel[2] = 0.0f;
-                }
-                ImGui::Separator();
-                if (isManualControl) {
-                    ImGui::Text("Manual Velocity Control");
-                    ImGui::SliderFloat("vx", &manualLinVel[0], -0.05f, 0.05f);
-                    ImGui::SliderFloat("vy", &manualLinVel[1], -0.05f, 0.05f);
-                    ImGui::SliderFloat("vz", &manualLinVel[2], -0.05f, 0.05f);
-                    ImGui::Separator();
-                    ImGui::SliderFloat("rva", &manualAngVel[0], -0.02f, 0.02f);
-                    ImGui::SliderFloat("rvb", &manualAngVel[1], -0.02f, 0.02f);
-                    ImGui::SliderFloat("rvc", &manualAngVel[2], -0.02f, 0.02f);
-                    if (ImGui::Button("Stop All")) {
-                        manualLinVel[0] = manualLinVel[1] = manualLinVel[2] = 0.0f;
-                        manualAngVel[0] = manualAngVel[1] = manualAngVel[2] = 0.0f;
-                    }
+                
+                if (rigidBodies.empty()) {
+                    ImGui::Text("No rigid bodies in scene.");
+                    ImGui::End();
                 } else {
-                    ImGui::Text("Mode: Bi-directional Physics");
-                }
-                ImGui::Separator();
-                if (!rigidBodies.empty()) {
+                    static int selectedBodyIndex = 0;
+                    
+                    ImGui::Text("Body Count: %u", rigidBodyCount);
+                    
+                    if (selectedBodyIndex >= (int)rigidBodies.size()) selectedBodyIndex = 0;
+                    
+                    for (size_t i = 0; i < rigidBodies.size(); i++) {
+                        char label[32];
+                        sprintf(label, "Body %zu", i);
+                        if (ImGui::RadioButton(label, selectedBodyIndex == (int)i)) {
+                            selectedBodyIndex = (int)i;
+                        }
+                        ImGui::SameLine();
+                        ImGui::Text("Mass: %.2f", rigidBodies[i].mass);
+                    }
+                    
+                    ImGui::Separator();
+                    
+                    RigidBody& body = rigidBodies[selectedBodyIndex];
+                    
+                    ImGui::Text("Selected: Body %d", selectedBodyIndex);
+                    ImGui::Text("Position: (%.1f, %.1f, %.1f)", body.position.x, body.position.y, body.position.z);
+                    
+                    ImGui::Separator();
+                    
+                    if (ImGui::Checkbox("Manual Control", &body.isManualControl)) {
+                        body.manualLinVel[0] = body.manualLinVel[1] = body.manualLinVel[2] = 0.0f;
+                        body.manualAngVel[0] = body.manualAngVel[1] = body.manualAngVel[2] = 0.0f;
+                    }
+                    
+                    ImGui::Separator();
+                    
+                    if (body.isManualControl) {
+                        ImGui::Text("Manual Velocity Control");
+                        ImGui::SliderFloat("vx", &body.manualLinVel[0], -0.05f, 0.05f);
+                        ImGui::SliderFloat("vy", &body.manualLinVel[1], -0.05f, 0.05f);
+                        ImGui::SliderFloat("vz", &body.manualLinVel[2], -0.05f, 0.05f);
+                        
+                        ImGui::Separator();
+                        ImGui::Text("Manual Angular Velocity");
+                        ImGui::SliderFloat("rva", &body.manualAngVel[0], -0.02f, 0.02f);
+                        ImGui::SliderFloat("rvb", &body.manualAngVel[1], -0.02f, 0.02f);
+                        ImGui::SliderFloat("rvc", &body.manualAngVel[2], -0.02f, 0.02f);
+                        
+                        if (ImGui::Button("Stop All")) {
+                            body.manualLinVel[0] = body.manualLinVel[1] = body.manualLinVel[2] = 0.0f;
+                            body.manualAngVel[0] = body.manualAngVel[1] = body.manualAngVel[2] = 0.0f;
+                        }
+                    } else {
+                        ImGui::Text("Mode: Bi-directional Physics");
+                    }
+                    
+                    ImGui::Separator();
+                    
                     if (ImGui::SliderFloat("Density", &rigidBodyDensity, 0.1f, 2.0f, "%.2f")) {
-                        for (auto& body : rigidBodies) {
-                            body.rho = rigidBodyDensity;
-                            body.updateInertia();
+                        for (auto& b : rigidBodies) {
+                            b.rho = rigidBodyDensity;
+                            b.updateInertia();
                         }
                     }
-                    ImGui::Text("Body Count: %u", rigidBodyCount);
-                    for (size_t i = 0; i < rigidBodies.size(); i++) {
-                        ImGui::Text("Body %zu Mass: %.2f", i, rigidBodies[i].mass);
-                    }
                 }
+                
                 ImGui::End();
             }
             
@@ -4376,6 +4409,32 @@ private:
         vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &fillmemorybarrier, 0, nullptr, 0, nullptr);
 
         if (enIBM) {
+            {
+                std::vector<RigidBodyInfo> updatedInfos;
+                for (size_t i = 0; i < rigidBodyCount; i++) {
+                    updatedInfos.push_back(rigidBodies[i].getRigidBodyInfo());
+                }
+                vkCmdUpdateBuffer(
+                    commandBuffer,
+                    rigidBodyInfoBuffers[currentFrame],
+                    0,
+                    sizeof(RigidBodyInfo) * rigidBodyCount,
+                    updatedInfos.data());
+                
+                VkMemoryBarrier infoUpdateBarrier{};
+                infoUpdateBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                infoUpdateBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                infoUpdateBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                vkCmdPipelineBarrier(
+                    commandBuffer,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    1, &infoUpdateBarrier,
+                    0, nullptr,
+                    0, nullptr);
+            }
+
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, rigidBodySolverPipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
             vkCmdDispatch(commandBuffer, rigidBodyCount, 1, 1);
