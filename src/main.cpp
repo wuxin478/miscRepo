@@ -1389,7 +1389,7 @@ private:
         appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
         appInfo.pEngineName = "No Engine";
         appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-        appInfo.apiVersion = VK_API_VERSION_1_0;
+        appInfo.apiVersion = VK_API_VERSION_1_1;
 
         VkInstanceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -4395,8 +4395,8 @@ private:
         if (!isInit) {
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, initPipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
-            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
             vkCmdDispatch(commandBuffer, Nxyz / 256 + 1, 1, 1);
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
 
             isInit = true;
         }
@@ -4452,6 +4452,14 @@ private:
         vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
 
         if (enIBM) {
+            {
+                VkMemoryBarrier preCopyBarrier{};
+                preCopyBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                preCopyBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                preCopyBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &preCopyBarrier, 0, nullptr, 0, nullptr);
+            }
+            
             VkBufferCopy copyRegion{};
             copyRegion.srcOffset = 0;
             copyRegion.dstOffset = 0;
@@ -4467,6 +4475,14 @@ private:
             for (int i = 0; i < 5; ++i) {
                 int iteration = i;
 
+                {
+                    VkMemoryBarrier preUpdateBarrier{};
+                    preUpdateBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                    preUpdateBarrier.srcAccessMask = VK_ACCESS_UNIFORM_READ_BIT;
+                    preUpdateBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &preUpdateBarrier, 0, nullptr, 0, nullptr);
+                }
+
                 vkCmdUpdateBuffer(
                     commandBuffer,
                     uniformBuffers[currentFrame],
@@ -4477,7 +4493,7 @@ private:
                 VkMemoryBarrier uboUpdateBarrier{};
                 uboUpdateBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
                 uboUpdateBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                uboUpdateBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                uboUpdateBarrier.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT;
 
                 vkCmdPipelineBarrier(
                     commandBuffer,
@@ -4514,17 +4530,25 @@ private:
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, collideAndStreamPipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
-        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
         vkCmdDispatch(commandBuffer, Nxyz / 256 + 1, 1, 1);
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
 
         for (uint32_t iter = 0; iter < 1; iter++) {
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
-            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
             vkCmdDispatch(commandBuffer, particle_count / 256 + 1, 1, 1);
+            vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memorybarrier, 0, nullptr, 0, nullptr);
         }
 
         if (enIBM) {
+            {
+                VkMemoryBarrier preLagCopyBarrier{};
+                preLagCopyBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                preLagCopyBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                preLagCopyBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &preLagCopyBarrier, 0, nullptr, 0, nullptr);
+            }
+            
             VkBufferCopy copyRegion{};
             copyRegion.srcOffset = 0;
             copyRegion.dstOffset = 0;
