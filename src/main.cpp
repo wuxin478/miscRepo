@@ -153,7 +153,7 @@ struct RigidBodyState {
 struct RigidBodyInfo {
     alignas(4) float mass;
     alignas(4) float inv_mass;
-    alignas(4) float inv_inertia;
+    alignas(16) glm::mat4 invInertiaTensor;
     alignas(4) float volume;
     alignas(4) uint32_t manualMode;
     alignas(16) glm::vec4 manualLinVel;
@@ -683,7 +683,7 @@ struct RigidBody {
         RigidBodyInfo info;
         info.mass = mass;
         info.inv_mass = inv_mass;
-        info.inv_inertia = invInertiaTensor[0][0];
+        info.invInertiaTensor = glm::mat4(invInertiaTensor);
         info.volume = volume;
         info.manualMode = isManualControl ? 1u : 0u;
         info.manualLinVel = glm::vec4(manualLinVel[0], manualLinVel[1], manualLinVel[2], 0.0f);
@@ -711,7 +711,7 @@ private:
     bool framebufferResized = false;
     bool isInit = false;
     uint32_t currentTime = 0;
-    int render_mode = 1;
+    int render_mode = 2;
     bool enIBM = true;
     float couplingStrength = 1.0f;
     bool isManualControl = true;
@@ -3012,14 +3012,14 @@ private:
                 RigidBody body1;
                 body1.shape = RigidBodyShape::MESH;
                 body1.meshFilePath = "models/fan_pointcloud.glb";
-                body1.meshScale = 40.0f;
+                body1.meshScale = 20.0f;
                 body1.meshCoordSystem = 1;
                 body1.rho = 1.0f;
                 body1.position = glm::vec3(Nx / 2.0f - 30.0f, Ny / 2.0f, Nz / 2.0f);
                 body1.orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
                 body1.linear_velocity = glm::vec3(0.0f);
                 body1.angular_velocity = glm::vec3(0.0f, 0.02f, 0.0f);
-                body1.isManualControl = true;
+                body1.isManualControl = false;
                 body1.manualLinVel[0] = 0.0f;
                 body1.manualLinVel[1] = 0.0f;
                 body1.manualLinVel[2] = 0.0f;
@@ -3030,19 +3030,19 @@ private:
 
                 RigidBody body2;
                 body2.shape = RigidBodyShape::SPHERE;
-                body2.radius = 15.0f;
+                body2.radius = 10.0f;
                 body2.rho = 1.0f;
                 body2.position = glm::vec3(Nx / 2.0f + 30.0f, Ny / 2.0f, Nz / 2.0f);
                 body2.orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
                 body2.linear_velocity = glm::vec3(0.0f);
-                body2.angular_velocity = glm::vec3(0.0f, 0.0f, -0.03f);
-                body2.isManualControl = true;
+                body2.angular_velocity = glm::vec3(0.0f, 0.0f, -0.02f);
+                body2.isManualControl = false;
                 body2.manualLinVel[0] = 0.0f;
                 body2.manualLinVel[1] = 0.0f;
                 body2.manualLinVel[2] = 0.0f;
                 body2.manualAngVel[0] = 0.0f;
                 body2.manualAngVel[1] = 0.0f;
-                body2.manualAngVel[2] = -0.03f;
+                body2.manualAngVel[2] = -0.02f;
                 body2.updateInertia();
                 rigidBodies.push_back(body2);
             }
@@ -4544,7 +4544,7 @@ private:
             ubo.Nxyz = Nxyz;
             ubo.particleCount = particle_count;
             ubo.particleRho = 1.0f;
-            ubo.niu = 0.1f;
+            ubo.niu = 0.01f;
             ubo.tau = 3.0f * ubo.niu + 0.5f;
             ubo.inv_tau = 1.0f / ubo.tau;
             ubo.fx = 0.0f;

@@ -348,9 +348,9 @@ void main()
     
     // FORCE_FIELD
     { // separate block to avoid variable name conflicts
-		fxn += 2.0f * rhon * float(bfs[            index]); // apply force field
-		fyn += 2.0f * rhon * float(bfs[   ubo.Nxyz+index]);
-		fzn += 2.0f * rhon * float(bfs[2u*ubo.Nxyz+index]);
+		fxn += float(bfs[            index]); // apply force field
+		fyn += float(bfs[   ubo.Nxyz+index]);
+		fzn += float(bfs[2u*ubo.Nxyz+index]);
 	}
 
     // VOLUME_FORCE

@@ -12,7 +12,7 @@ struct RigidBodyState {
 struct RigidBodyInfo {
     float mass;
     float inv_mass;
-    float inv_inertia;
+    mat4 invInertiaTensor;
     float volume;
     uint manualMode;
     vec4 manualLinVel;
@@ -95,11 +95,11 @@ void main() {
         vec3 acc = total_force_vec * info.inv_mass;
         body.lin_vel.xyz = (body.lin_vel.xyz + acc * dt) * 0.999;
 
-        vec3 ang_acc = total_torque * info.inv_inertia;
+        vec3 ang_acc = (info.invInertiaTensor * vec4(total_torque, 0.0)).xyz;
         body.ang_vel.xyz = (body.ang_vel.xyz + ang_acc * dt) * 0.999;
     }
 
-    float max_vel = 0.2;
+    float max_vel = 0.04;
     float lin_vel_len = length(body.lin_vel.xyz);
     if (lin_vel_len > max_vel) {
         body.lin_vel.xyz = normalize(body.lin_vel.xyz) * max_vel;
