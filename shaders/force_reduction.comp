@@ -1,69 +1,9 @@
 #version 450
 #extension GL_EXT_shader_atomic_float : require
 #extension GL_EXT_scalar_block_layout : require
+#extension GL_GOOGLE_include_directive : require
 
-struct LagrangianPoint {
-    vec4 position;
-};
-
-struct LagrangianData {
-    vec4 velocity;
-    vec4 force;
-};
-
-struct RigidBodyState {
-    vec4 position;
-    vec4 orientation;
-    vec4 lin_vel;
-    vec4 ang_vel;
-    mat4 modelMatrix;
-};
-
-layout (std430, binding = 0) uniform SimulateUBO {
-    uint Nx;
-    uint Ny;
-    uint Nz;
-    uint Nxyz;
-    uint particleCount;
-    float particleRho;
-    float niu;
-    float tau;
-    float inv_tau;
-    float fx;
-    float fy;
-    float fz;
-    float dt;
-    uint t;
-    uint render_mode;
-    uint fixed_point_iteration;
-    uint lagrangianPointCount;
-    float couplingStrength;
-    uint rigidBodyCount;
-    uint useEmitter;
-    float spawnRate;
-    vec4 emitterPos;
-    vec4 emitterVel;
-} ubo;
-
-layout(std430, binding = 8) buffer LagrangianDataBuffer {
-    LagrangianData lagrangianData[];
-};
-
-layout(std430, binding = 9) buffer LagrangianPointsRest {
-    LagrangianPoint lagrangianPoints_Rest[];
-};
-
-layout(std430, binding = 12) buffer TotalForceTorqueBuffer {
-    vec4 total_force_torque[];
-};
-
-layout(std430, binding = 13) buffer RigidBodyStateBuffer {
-    RigidBodyState bodies[];
-};
-
-layout(std430, binding = 16) buffer BodyIndexBuffer {
-    uint bodyIndices[];
-};
+#include "simulate_header.glsl"
 
 #define WORKGROUP_SIZE 256
 layout (local_size_x = WORKGROUP_SIZE, local_size_y = 1, local_size_z = 1) in;

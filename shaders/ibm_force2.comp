@@ -1,182 +1,9 @@
 #version 450
-#extension GL_EXT_shader_atomic_float : require // 对于某些硬件，可能需要用 int 实现原子加
+#extension GL_EXT_shader_atomic_float : require
 #extension GL_EXT_scalar_block_layout : require
+#extension GL_GOOGLE_include_directive : require
 
-#define D 3
-#define Q 19
-#define SCALE 1e10
-#define def_c 0.57735027f
-
-#define def_w0 (1.0f/3.0f ) // center (0)
-#define def_ws (1.0f/18.0f) // straight (1-6)
-#define def_we (1.0f/36.0f) // edge (7-18)
-
-#define TYPE_S  0x01 // 0b00000001 // (stationary or moving) solid boundary
-#define TYPE_E  0x02 // 0b00000010 // equilibrium boundary (inflow/outflow)
-#define TYPE_T  0x04 // 0b00000100 // temperature boundary
-#define TYPE_F  0x08 // 0b00001000 // fluid
-#define TYPE_I  0x10 // 0b00010000 // interface
-#define TYPE_G  0x20 // 0b00100000 // gas
-#define TYPE_X  0x40 // 0b01000000 // reserved type X
-#define TYPE_Y  0x80 // 0b10000000 // reserved type Y
-
-#define TYPE_MS 0x03 // 0b00000011 // cell next to moving solid boundary
-#define TYPE_BO 0x03 // 0b00000011 // any flag bit used for boundaries (temperature excluded)
-#define TYPE_IF 0x18 // 0b00011000 // change from interface to fluid
-#define TYPE_IG 0x30 // 0b00110000 // change from interface to gas
-#define TYPE_GI 0x38 // 0b00111000 // change from gas to interface
-#define TYPE_SU 0x38 // 0b00111000 // any flag bit used for SURFACE
-
-#define fma(a, b, c) ((a)*(b)+(c))
-#define load(p,o) p[o]
-#define store(p,o,x) p[o]=x
-float w[Q] = {
-    1.0f /  3.0f,
-    1.0f / 18.0f,
-    1.0f / 18.0f,
-    1.0f / 18.0f,
-    1.0f / 18.0f,
-    1.0f / 18.0f,
-    1.0f / 18.0f,
-    1.0f / 36.0f,
-    1.0f / 36.0f,
-    1.0f / 36.0f,
-    1.0f / 36.0f,
-    1.0f / 36.0f,
-    1.0f / 36.0f,
-    1.0f / 36.0f,
-    1.0f / 36.0f,
-    1.0f / 36.0f,
-    1.0f / 36.0f,
-    1.0f / 36.0f,
-    1.0f / 36.0f,
-};
-
-ivec3 e[Q] = {
-    { 0,  0,  0},
-    { 1,  0,  0},
-    {-1,  0,  0},
-    { 0,  1,  0},
-    { 0, -1,  0},
-    { 0,  0,  1},
-    { 0,  0, -1},
-    { 1,  1,  0},
-    {-1, -1,  0},
-    { 1,  0,  1},
-    {-1,  0, -1},
-    { 0,  1,  1},
-    { 0, -1, -1},
-    { 1, -1,  0},
-    {-1,  1,  0},
-    { 1,  0, -1},
-    {-1,  0,  1},
-    { 0,  1, -1},
-    { 0, -1,  1},
-};
-
-struct Particle {
-	vec4 position;
-    vec4 color;
-};
-
-struct LagrangianPoint {
-    vec4 position;
-};
-
-struct LagrangianData {
-    vec4 velocity;
-    vec4 force;
-};
-
-layout (std430, binding = 0) uniform SimulateUBO {
-    uint Nx;
-    uint Ny;
-    uint Nz;
-    uint Nxyz;
-    uint particleCount;
-    float particleRho;
-    float niu;
-    float tau;
-    float inv_tau;
-    float fx;
-    float fy;
-    float fz;
-    float dt;
-    uint t;
-    uint render_mode;
-    uint fixed_point_iteration;
-    uint lagrangianPointCount;
-    float couplingStrength;
-    uint rigidBodyCount;
-    uint useEmitter;
-    float spawnRate;
-    vec4 emitterPos;
-    vec4 emitterVel;
-} ubo;
-
-layout(std430, binding = 1) buffer Particles {
-   Particle particles[];
-};
-
-layout(std430, binding = 2) buffer Velocity {
-    float vels[];
-};
-
-layout(std430, binding = 3) buffer Rho {
-    float rhos[];
-};
-
-layout(std430, binding = 4) buffer Flag {
-    uint flags[];
-};
-
-layout(std430, binding = 5) buffer DDF {
-    float ddfs[];
-};
-
-layout(std430, binding = 6) buffer BorderForce {
-    float bfs[];
-};
-
-layout(std430, binding = 7) buffer LagrangianPoints {
-    LagrangianPoint lagrangianPoints[];
-};
-
-layout(std430, binding = 8) buffer LagrangianDataBuffer {
-    LagrangianData lagrangianData[];
-};
-
-layout(std430, binding = 11) buffer TempForce {
-    vec4 tempForces[];
-};
-
-layout(std430, binding = 17) buffer TempVelocity {
-    float tempVels[];
-};
-
-layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
-
-// IBM 核心：Peskin 的 4 点离散 Delta 权重函数 (基于论文定义)
-float peskin_w(float r) {
-    float abs_r = abs(r);
-    
-    if (abs_r <= 1.0) {
-        // 1/8 * (3 - 2|r| + sqrt(1 + 4|r| - 4r^2))
-        // 加上 max(0, ...) 是为了防止浮点误差导致 sqrt 内部出现极小负数
-        return 0.125 * (3.0 - 2.0 * abs_r + sqrt(max(0.0, 1.0 + 4.0 * abs_r - 4.0 * abs_r * abs_r)));
-    } 
-    else if (abs_r <= 2.0) {
-        // 1/8 * (5 - 2|r| - sqrt( -7 + 12|r| - 4r^2 ))
-        return 0.125 * (5.0 - 2.0 * abs_r - sqrt(max(0.0, -7.0 + 12.0 * abs_r - 4.0 * abs_r * abs_r)));
-    } 
-    return 0.0; // r > 2.0 时截断为 0
-}
-
-// 辅助函数：计算 3D 空间下的权重乘积 w(|x-X|) * w(|y-Y|) * w(|z-Z|)
-float compute_weight_3d(vec3 lagrangian_pos, vec3 eulerian_pos) {
-    vec3 r = lagrangian_pos - eulerian_pos;
-    return peskin_w(r.x) * peskin_w(r.y) * peskin_w(r.z);
-}
+#include "simulate_header.glsl"
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
@@ -196,7 +23,6 @@ void main()
         force_to_spread = tempForces[k].xyz;
     }
 
-    // --- 2. 将力扩散到周围的 5x5x5 流体晶格 ---
     ivec3 center_cell = ivec3(round(point_pos));
     for (int i = -2; i <= 2; ++i) {
     for (int j = -2; j <= 2; ++j) {
@@ -215,14 +41,11 @@ void main()
 
         vec3 force_on_cell = force_to_spread * weight;
 
-        // --- 3. 【核心】使用原子加来更新流场 ---
         if (is_last_iteration) {
-            // 最后一次: G(X,Y,Z) = Σ Δu(k) * w(...) -> 写入 bfs
             atomicAdd(bfs[fluid_index],               force_on_cell.x);
             atomicAdd(bfs[ubo.Nxyz + fluid_index],    force_on_cell.y);
             atomicAdd(bfs[2 * ubo.Nxyz + fluid_index],force_on_cell.z);
         } else {
-            // 中间迭代: U_iter+1 = U_iter + Σ g(k) * w(...) -> 更新 tempVels
             atomicAdd(tempVels[fluid_index],               force_on_cell.x);
             atomicAdd(tempVels[ubo.Nxyz + fluid_index],    force_on_cell.y);
             atomicAdd(tempVels[2 * ubo.Nxyz + fluid_index],force_on_cell.z);
