@@ -201,6 +201,10 @@ layout(std430, binding = 17) buffer TempVelocityBuffer {
     float tempVels[];
 };
 
+layout(std430, binding = 18) buffer DebugBuffer {
+    vec4 debugData[];
+};
+
 uint index_f(uint n, uint i) {
     return i * ubo.Nxyz + n;
 }

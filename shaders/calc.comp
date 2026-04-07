@@ -179,6 +179,10 @@ layout(std430, binding = 8) buffer LagrangianDataBuffer {
     LagrangianData lagrangianData[];
 };
 
+layout(std430, binding = 18) buffer DebugBuffer {
+    vec4 debugData[];
+};
+
 layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 uint index_f(uint n, uint i) {
@@ -329,6 +333,55 @@ vec3 interpolate_u(vec3 pos) {
     return trilinear3(factor, u);
 }
 
+vec3 calculate_vorticity(vec3 pos) {
+    ivec3 lattice = ivec3(pos);
+    
+    if (lattice.x < 1 || lattice.x >= int(ubo.Nx) - 1 ||
+        lattice.y < 1 || lattice.y >= int(ubo.Ny) - 1 ||
+        lattice.z < 1 || lattice.z >= int(ubo.Nz) - 1) {
+        return vec3(0.0f);
+    }
+    
+    uint x = uint(lattice.x);
+    uint y = uint(lattice.y);
+    uint z = uint(lattice.z);
+    
+    uint idx_xp = (x + 1) + (y + z * ubo.Ny) * ubo.Nx;
+    uint idx_xm = (x - 1) + (y + z * ubo.Ny) * ubo.Nx;
+    uint idx_yp = x + ((y + 1) + z * ubo.Ny) * ubo.Nx;
+    uint idx_ym = x + ((y - 1) + z * ubo.Ny) * ubo.Nx;
+    uint idx_zp = x + (y + (z + 1) * ubo.Ny) * ubo.Nx;
+    uint idx_zm = x + (y + (z - 1) * ubo.Ny) * ubo.Nx;
+    
+    float u_yp = vels[idx_yp];
+    float u_ym = vels[idx_ym];
+    float u_zp = vels[idx_zp];
+    float u_zm = vels[idx_zm];
+    
+    float v_xp = vels[ubo.Nxyz + idx_xp];
+    float v_xm = vels[ubo.Nxyz + idx_xm];
+    float v_zp = vels[ubo.Nxyz + idx_zp];
+    float v_zm = vels[ubo.Nxyz + idx_zm];
+    
+    float w_xp = vels[2u * ubo.Nxyz + idx_xp];
+    float w_xm = vels[2u * ubo.Nxyz + idx_xm];
+    float w_yp = vels[2u * ubo.Nxyz + idx_yp];
+    float w_ym = vels[2u * ubo.Nxyz + idx_ym];
+    
+    float du_dy = (u_yp - u_ym) * 0.5f;
+    float du_dz = (u_zp - u_zm) * 0.5f;
+    float dv_dx = (v_xp - v_xm) * 0.5f;
+    float dv_dz = (v_zp - v_zm) * 0.5f;
+    float dw_dx = (w_xp - w_xm) * 0.5f;
+    float dw_dy = (w_yp - w_ym) * 0.5f;
+    
+    float omega_x = dw_dy - dv_dz;
+    float omega_y = du_dz - dw_dx;
+    float omega_z = dv_dx - du_dy;
+    
+    return vec3(omega_x, omega_y, omega_z);
+}
+
 //vec3 particle_boundary_force(const vec3 p) { // normalized pseudo-force to prevent particles from entering solid boundaries or exiting fluid phase
 //	const float xa=p.x-0.5f+1.5f*float(ubo.Nx), ya=p.y-0.5f+1.5f*float(ubo.Ny), za=p.z-0.5f+1.5f*float(ubo.Nz); // subtract lattice offsets
 //	const uint xb=uint(xa), yb=uint(ya), zb=uint(za); // integer casting to find bottom left corner
@@ -423,6 +476,11 @@ void main()
     uint index = gl_GlobalInvocationID.z * globalSize.x * globalSize.y + gl_GlobalInvocationID.y * globalSize.x + gl_GlobalInvocationID.x;
     if (index >= ubo.particleCount) return;
 
+    if (index < ubo.Nxyz) { // calc Vorticity
+        uvec3 coor = coordinates(index);
+        debugData[index] = vec4(calculate_vorticity(vec3(coor)), 0.0f);
+    }
+
     Particle particle = particles[index];
     
     vec3 p0 = particle.position.xyz;
@@ -451,7 +509,9 @@ void main()
                 vec3 spawnPos = ubo.emitterPos.xyz + offset;
                 
                 particles[index].position = vec4(spawnPos, 0.0f);
-                particles[index].color = vec4(0.8f, 0.8f, 0.2f, 1.0f);
+                
+                vec3 vorticity = calculate_vorticity(spawnPos);
+                particles[index].color = vec4(vorticity, 1.0f);
             }
         }
         return;
@@ -514,5 +574,8 @@ void main()
         particles[index].color.a = 0.0f;
     } else {
         particles[index].position = vec4(p, 0.0f);
+        
+        vec3 vorticity = calculate_vorticity(p);
+        particles[index].color = vec4((vorticity + 0.06) / 2 / 0.06, life);
     }
 }

@@ -37,7 +37,7 @@ void main() {
     
     if (ubo.render_mode == 1) {
         gl_PointSize = 2.0;
-        fragColor = vec3(0.2, 1.0, 0.2);
+        fragColor = inColor.rgb;
         fragAlpha = 1.0;
     } else {
         float randSize = 0.8 + fract(sin(float(gl_VertexIndex)) * 43758.5453) * 0.4;

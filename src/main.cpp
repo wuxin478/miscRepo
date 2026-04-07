@@ -1046,7 +1046,7 @@ private:
     float rigidBodyDensity = 1.0f;
     uint32_t useEmitter = 1;
     float spawnRate = 200.0f;
-    float emitterPos[4] = { Nx / 2.0f, 30.0f, Nz / 2.0f, 1.0f };
+    float emitterPos[4] = { Nx / 2.0f - 5.0f, Ny / 2.0f - 5.0f, 30.0f, 1.0f };
     float emitterVel[4] = { 0.0f, 0.0f, 0.15f, 0.0f };
 
     VkInstance instance;
@@ -1128,6 +1128,9 @@ private:
 
     std::vector<VkBuffer> skBuffers;
     std::vector<VkDeviceMemory> skBuffersMemory;
+
+    std::vector<VkBuffer> debugBuffers;
+    std::vector<VkDeviceMemory> debugBuffersMemory;
 
     std::vector<VkBuffer> totalForceTorqueBuffers;
     std::vector<VkDeviceMemory> totalForceTorqueBuffersMemory;
@@ -1642,6 +1645,8 @@ private:
             vkFreeMemory(device, tempForcesBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, skBuffers[i], nullptr);
             vkFreeMemory(device, skBuffersMemory[i], nullptr);
+            vkDestroyBuffer(device, debugBuffers[i], nullptr);
+            vkFreeMemory(device, debugBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, totalForceTorqueBuffers[i], nullptr);
             vkFreeMemory(device, totalForceTorqueBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, rigidBodyStateBuffers[i], nullptr);
@@ -2054,7 +2059,7 @@ private:
     }
 
     void createComputeDescriptorSetLayout() {
-        std::array<VkDescriptorSetLayoutBinding, 18> layoutBindings{};
+        std::array<VkDescriptorSetLayoutBinding, 19> layoutBindings{};
 
         // ubo
         layoutBindings[0].binding = 0;
@@ -2181,6 +2186,13 @@ private:
         layoutBindings[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         layoutBindings[17].pImmutableSamplers = nullptr;
         layoutBindings[17].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+        // debug
+        layoutBindings[18].binding = 18;
+        layoutBindings[18].descriptorCount = 1;
+        layoutBindings[18].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[18].pImmutableSamplers = nullptr;
+        layoutBindings[18].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -3531,7 +3543,7 @@ private:
                 body2.meshScale = 10.0f;
                 body2.meshCoordSystem = 0;
                 body2.rho = 1.0f;
-                body2.position = glm::vec3(Nx / 2.0f + 30.0f, Ny / 2.0f, Nz / 2.0f);
+                body2.position = glm::vec3(Nx / 2.0f, Ny / 2.0f, Nz / 2.0f);
                 body2.orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
                 body2.linear_velocity = glm::vec3(0.0f);
                 body2.angular_velocity = glm::vec3(0.0f, 0.0f, -0.02f);
@@ -3794,6 +3806,14 @@ private:
 
             vkDestroyBuffer(device, stagingBuffer, nullptr);
             vkFreeMemory(device, stagingBufferMemory, nullptr);
+
+            VkDeviceSize debugBufferSize = sizeof(glm::vec4) * Nxyz;
+            debugBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+            debugBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                createBuffer(debugBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, debugBuffers[i], debugBuffersMemory[i]);
+            }
 
             VkDeviceSize totalForceTorqueBufferSize = sizeof(glm::vec4) * 2 * rigidBodyCount;
             totalForceTorqueBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -4088,7 +4108,7 @@ private:
                     float dist = sqrt(dx * dx + dy * dy);
                     float maxDist = sqrt(cx * cx + cy * cy);
                     float t = std::min(dist / maxDist, 1.0f);
-                    // vels[index + 2 * Nxyz] = 0.05f * (1.0f - t) + 0.05f * t;
+                    vels[index + 2 * Nxyz] = 0.05f * (1.0f - t) + 0.05f * t;
                 }
                 else if (z == Nz - 1) {
                     // vels[index + 2 * Nxyz] = 0.0f;
@@ -4172,7 +4192,7 @@ private:
                 if (x == 0 || x == Nx - 1 || y == 0 || y == Ny - 1) {
                     flags[index] = TYPE_X;
                 } else if (z == 0) {
-                    flags[index] = TYPE_X;
+                    flags[index] = TYPE_E;
                 } else if (z == Nz - 1) {
                     flags[index] = TYPE_X;
                 }
@@ -4413,7 +4433,7 @@ private:
             uniformBufferInfo.offset = 0;
             uniformBufferInfo.range = sizeof(SimulateUBO);
 
-            std::array<VkWriteDescriptorSet, 18> descriptorWrites{};
+            std::array<VkWriteDescriptorSet, 19> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = computeDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -4642,6 +4662,19 @@ private:
             descriptorWrites[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[17].descriptorCount = 1;
             descriptorWrites[17].pBufferInfo = &tempVelBufferInfo;
+
+            VkDescriptorBufferInfo debugBufferInfo{};
+            debugBufferInfo.buffer = debugBuffers[i];
+            debugBufferInfo.offset = 0;
+            debugBufferInfo.range = sizeof(glm::vec4) * Nxyz;
+
+            descriptorWrites[18].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[18].dstSet = computeDescriptorSets[i];
+            descriptorWrites[18].dstBinding = 18;
+            descriptorWrites[18].dstArrayElement = 0;
+            descriptorWrites[18].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[18].descriptorCount = 1;
+            descriptorWrites[18].pBufferInfo = &debugBufferInfo;
 
             vkUpdateDescriptorSets(device, descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
         }
