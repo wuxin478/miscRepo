@@ -230,6 +230,36 @@ struct Vertex {
     }
 };
 
+struct MeshVertex {
+    alignas(16) glm::vec3 pos;
+    alignas(16) glm::vec3 normal;
+
+    static VkVertexInputBindingDescription getBindingDescription() {
+        VkVertexInputBindingDescription bindingDescription{};
+        bindingDescription.binding = 0;
+        bindingDescription.stride = sizeof(MeshVertex);
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+        return bindingDescription;
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+
+        attributeDescriptions[0].binding = 0;
+        attributeDescriptions[0].location = 0;
+        attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[0].offset = offsetof(MeshVertex, pos);
+
+        attributeDescriptions[1].binding = 0;
+        attributeDescriptions[1].location = 1;
+        attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[1].offset = offsetof(MeshVertex, normal);
+
+        return attributeDescriptions;
+    }
+};
+
 struct LagrangianPoint {
     alignas(16) glm::vec4 position;
 };
@@ -564,6 +594,301 @@ bool loadMeshFromGLB(const std::string& filepath,
     return true;
 }
 
+bool loadMeshTrianglesFromGLB(const std::string& filepath,
+                              std::vector<MeshVertex>& vertices,
+                              std::vector<uint32_t>& indices) {
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open GLB file: " << filepath << std::endl;
+        return false;
+    }
+
+    uint32_t magic, version, totalLength;
+    file.read(reinterpret_cast<char*>(&magic), 4);
+    file.read(reinterpret_cast<char*>(&version), 4);
+    file.read(reinterpret_cast<char*>(&totalLength), 4);
+
+    if (magic != 0x46546C67) {
+        std::cerr << "Invalid GLB file: wrong magic number" << std::endl;
+        return false;
+    }
+
+    uint32_t jsonChunkLength, jsonChunkType;
+    file.read(reinterpret_cast<char*>(&jsonChunkLength), 4);
+    file.read(reinterpret_cast<char*>(&jsonChunkType), 4);
+
+    if (jsonChunkType != 0x4E4F534A) {
+        std::cerr << "Invalid GLB file: expected JSON chunk" << std::endl;
+        return false;
+    }
+
+    std::string jsonContent(jsonChunkLength, '\0');
+    file.read(&jsonContent[0], jsonChunkLength);
+
+    uint32_t binChunkLength = 0, binChunkType = 0;
+    file.read(reinterpret_cast<char*>(&binChunkLength), 4);
+    file.read(reinterpret_cast<char*>(&binChunkType), 4);
+
+    if (binChunkType != 0x004E4942) {
+        std::cerr << "Invalid GLB file: expected BIN chunk" << std::endl;
+        return false;
+    }
+
+    auto extractNumber = [](const std::string& json, const std::string& key, size_t startPos = 0) -> int {
+        std::string searchStr = "\"" + key + "\"";
+        size_t pos = json.find(searchStr, startPos);
+        if (pos == std::string::npos) return -1;
+        
+        size_t colonPos = json.find(':', pos);
+        if (colonPos == std::string::npos) return -1;
+        
+        size_t valueStart = json.find_first_of("-0123456789", colonPos);
+        if (valueStart == std::string::npos) return -1;
+        
+        size_t valueEnd = json.find_first_not_of("-0123456789", valueStart);
+        if (valueEnd == std::string::npos) valueEnd = json.length();
+        
+        try {
+            return std::stoi(json.substr(valueStart, valueEnd - valueStart));
+        } catch (...) {
+            return -1;
+        }
+    };
+
+    auto findAccessorIndex = [](const std::string& json, const std::string& semantic) -> int {
+        size_t primitivesPos = json.find("\"primitives\"");
+        if (primitivesPos == std::string::npos) return -1;
+        
+        size_t attributesPos = json.find("\"attributes\"", primitivesPos);
+        if (attributesPos == std::string::npos) return -1;
+        
+        std::string searchStr = "\"" + semantic + "\"";
+        size_t semanticPos = json.find(searchStr, attributesPos);
+        if (semanticPos == std::string::npos) return -1;
+        
+        size_t colonPos = json.find(':', semanticPos);
+        if (colonPos == std::string::npos) return -1;
+        
+        size_t valueStart = json.find_first_of("-0123456789", colonPos);
+        if (valueStart == std::string::npos) return -1;
+        
+        size_t valueEnd = json.find_first_not_of("-0123456789", valueStart);
+        if (valueEnd == std::string::npos) valueEnd = json.length();
+        
+        try {
+            return std::stoi(json.substr(valueStart, valueEnd - valueStart));
+        } catch (...) {
+            return -1;
+        }
+    };
+
+    int positionAccessorIdx = findAccessorIndex(jsonContent, "POSITION");
+    int normalAccessorIdx = findAccessorIndex(jsonContent, "NORMAL");
+    
+    size_t primitivesPos = jsonContent.find("\"primitives\"");
+    int indicesAccessorIdx = -1;
+    if (primitivesPos != std::string::npos) {
+        size_t indicesPos = jsonContent.find("\"indices\"", primitivesPos);
+        if (indicesPos != std::string::npos) {
+            size_t colonPos = jsonContent.find(':', indicesPos);
+            if (colonPos != std::string::npos) {
+                size_t valueStart = jsonContent.find_first_of("-0123456789", colonPos);
+                if (valueStart != std::string::npos) {
+                    size_t valueEnd = jsonContent.find_first_not_of("-0123456789", valueStart);
+                    if (valueEnd == std::string::npos) valueEnd = jsonContent.length();
+                    try {
+                        indicesAccessorIdx = std::stoi(jsonContent.substr(valueStart, valueEnd - valueStart));
+                    } catch (...) {}
+                }
+            }
+        }
+    }
+    
+    std::cout << "GLB Mesh Debug: positionAccessor=" << positionAccessorIdx 
+              << ", normalAccessor=" << normalAccessorIdx
+              << ", indicesAccessor=" << indicesAccessorIdx << std::endl;
+
+    auto getAccessorInfo = [&](int accessorIdx) -> std::tuple<int, int, int, int> {
+        if (accessorIdx < 0) return {-1, -1, -1, -1};
+        
+        std::string accessorSearch = "\"accessors\"";
+        size_t accessorPos = jsonContent.find(accessorSearch);
+        if (accessorPos == std::string::npos) return {-1, -1, -1, -1};
+        
+        size_t startBracket = jsonContent.find('[', accessorPos);
+        size_t currentBracket = startBracket;
+        int currentIdx = 0;
+        
+        while (currentIdx <= accessorIdx) {
+            size_t nextBracket = jsonContent.find('{', currentBracket);
+            if (nextBracket == std::string::npos) break;
+            
+            if (currentIdx == accessorIdx) {
+                size_t endBracket = jsonContent.find('}', nextBracket);
+                std::string accessorStr = jsonContent.substr(nextBracket, endBracket - nextBracket);
+                
+                int count = -1, bufferView = -1, byteOffset = 0, componentType = -1;
+                
+                size_t countPos = accessorStr.find("\"count\"");
+                if (countPos != std::string::npos) {
+                    count = extractNumber(accessorStr, "count", countPos);
+                }
+                
+                size_t bvPos = accessorStr.find("\"bufferView\"");
+                if (bvPos != std::string::npos) {
+                    bufferView = extractNumber(accessorStr, "bufferView", bvPos);
+                }
+                
+                size_t boPos = accessorStr.find("\"byteOffset\"");
+                if (boPos != std::string::npos) {
+                    byteOffset = extractNumber(accessorStr, "byteOffset", boPos);
+                }
+                
+                size_t ctPos = accessorStr.find("\"componentType\"");
+                if (ctPos != std::string::npos) {
+                    componentType = extractNumber(accessorStr, "componentType", ctPos);
+                }
+                
+                return {count, bufferView, byteOffset, componentType};
+            }
+            
+            currentBracket = jsonContent.find(',', nextBracket);
+            if (currentBracket == std::string::npos) break;
+            currentIdx++;
+        }
+        
+        return {-1, -1, -1, -1};
+    };
+
+    auto getBufferViewInfo = [&](int bufferViewIdx) -> std::tuple<int, int> {
+        if (bufferViewIdx < 0) return {-1, -1};
+        
+        std::string bvSearch = "\"bufferViews\"";
+        size_t bvPos = jsonContent.find(bvSearch);
+        if (bvPos == std::string::npos) return {-1, -1};
+        
+        size_t startBracket = jsonContent.find('[', bvPos);
+        size_t currentBracket = startBracket;
+        int currentIdx = 0;
+        
+        while (currentIdx <= bufferViewIdx) {
+            size_t nextBracket = jsonContent.find('{', currentBracket);
+            if (nextBracket == std::string::npos) break;
+            
+            if (currentIdx == bufferViewIdx) {
+                size_t endBracket = jsonContent.find('}', nextBracket);
+                std::string bvStr = jsonContent.substr(nextBracket, endBracket - nextBracket);
+                
+                int byteOffset = 0, byteLength = -1;
+                
+                size_t offsetPos = bvStr.find("\"byteOffset\"");
+                if (offsetPos != std::string::npos) {
+                    byteOffset = extractNumber(bvStr, "byteOffset", offsetPos);
+                }
+                
+                size_t lengthPos = bvStr.find("\"byteLength\"");
+                if (lengthPos != std::string::npos) {
+                    byteLength = extractNumber(bvStr, "byteLength", lengthPos);
+                }
+                
+                return {byteOffset, byteLength};
+            }
+            
+            currentBracket = jsonContent.find(',', nextBracket);
+            if (currentBracket == std::string::npos) break;
+            currentIdx++;
+        }
+        
+        return {-1, -1};
+    };
+
+    size_t binDataOffset = 12 + 8 + jsonChunkLength + 8;
+
+    auto [posCount, posBufferView, posByteOffset, posComponentType] = getAccessorInfo(positionAccessorIdx);
+    auto [normCount, normBufferView, normByteOffset, normComponentType] = getAccessorInfo(normalAccessorIdx);
+    auto [idxCount, idxBufferView, idxByteOffset, idxComponentType] = getAccessorInfo(indicesAccessorIdx);
+
+    if (posCount <= 0) {
+        std::cerr << "Failed to find position data in GLB" << std::endl;
+        return false;
+    }
+
+    auto [posBvOffset, posBvLength] = getBufferViewInfo(posBufferView);
+    auto [normBvOffset, normBvLength] = getBufferViewInfo(normBufferView);
+    auto [idxBvOffset, idxBvLength] = getBufferViewInfo(idxBufferView);
+
+    vertices.resize(posCount);
+    
+    size_t posDataOffset = binDataOffset + posBvOffset + posByteOffset;
+    file.seekg(posDataOffset, std::ios::beg);
+    std::vector<glm::vec3> positions(posCount);
+    file.read(reinterpret_cast<char*>(positions.data()), posCount * sizeof(glm::vec3));
+    
+    for (int i = 0; i < posCount; ++i) {
+        vertices[i].pos = positions[i];
+    }
+
+    if (normCount > 0 && normBufferView >= 0) {
+        size_t normDataOffset = binDataOffset + normBvOffset + normByteOffset;
+        file.seekg(normDataOffset, std::ios::beg);
+        std::vector<glm::vec3> normals(normCount);
+        file.read(reinterpret_cast<char*>(normals.data()), normCount * sizeof(glm::vec3));
+        
+        for (int i = 0; i < std::min(posCount, normCount); ++i) {
+            vertices[i].normal = normals[i];
+        }
+    } else {
+        for (int i = 0; i < posCount; ++i) {
+            vertices[i].normal = glm::vec3(0.0f, 1.0f, 0.0f);
+        }
+    }
+
+    if (idxCount > 0 && idxBufferView >= 0) {
+        size_t idxDataOffset = binDataOffset + idxBvOffset + idxByteOffset;
+        file.seekg(idxDataOffset, std::ios::beg);
+        
+        if (idxComponentType == 5123) {
+            std::vector<uint16_t> indices16(idxCount);
+            file.read(reinterpret_cast<char*>(indices16.data()), idxCount * sizeof(uint16_t));
+            indices.resize(idxCount);
+            for (int i = 0; i < idxCount; ++i) {
+                indices[i] = static_cast<uint32_t>(indices16[i]);
+            }
+            std::cout << "  Index type: uint16" << std::endl;
+        } else if (idxComponentType == 5125) {
+            indices.resize(idxCount);
+            file.read(reinterpret_cast<char*>(indices.data()), idxCount * sizeof(uint32_t));
+            std::cout << "  Index type: uint32" << std::endl;
+        } else if (idxComponentType == 5121) {
+            std::vector<uint8_t> indices8(idxCount);
+            file.read(reinterpret_cast<char*>(indices8.data()), idxCount * sizeof(uint8_t));
+            indices.resize(idxCount);
+            for (int i = 0; i < idxCount; ++i) {
+                indices[i] = static_cast<uint32_t>(indices8[i]);
+            }
+            std::cout << "  Index type: uint8" << std::endl;
+        } else {
+            std::cerr << "Unknown index component type: " << idxComponentType << std::endl;
+            indices.clear();
+            for (int i = 0; i < posCount; ++i) {
+                indices.push_back(i);
+            }
+        }
+    } else {
+        indices.clear();
+        for (int i = 0; i < posCount; ++i) {
+            indices.push_back(i);
+        }
+    }
+
+    std::cout << "Loaded mesh from GLB: " << filepath << std::endl;
+    std::cout << "  Vertices: " << posCount << std::endl;
+    std::cout << "  Indices: " << indices.size() << std::endl;
+    std::cout << "  Triangles: " << indices.size() / 3 << std::endl;
+
+    return true;
+}
+
 struct RigidBody {
     RigidBodyShape shape = RigidBodyShape::SPHERE;
     float rho;
@@ -712,6 +1037,7 @@ private:
     bool isInit = false;
     uint32_t currentTime = 0;
     int render_mode = 2;
+    int model_render_mode = 1; // 0: Particles, 1: Mesh
     bool enIBM = true;
     float couplingStrength = 1.0f;
     bool isManualControl = true;
@@ -821,6 +1147,14 @@ private:
     std::vector<VkDeviceMemory> wireframeBuffersMemory;
     std::vector<VkBuffer> wireframeIndexBuffers;
     std::vector<VkDeviceMemory> wireframeIndexBuffersMemory;
+
+    std::vector<std::vector<MeshVertex>> meshVerticesPerBody;
+    std::vector<std::vector<uint32_t>> meshIndicesPerBody;
+    std::vector<VkBuffer> meshVertexBuffers;
+    std::vector<VkDeviceMemory> meshVertexBuffersMemory;
+    std::vector<VkBuffer> meshIndexBuffers;
+    std::vector<VkDeviceMemory> meshIndexBuffersMemory;
+    VkPipeline meshPipeline;
 
     std::vector<VkBuffer> skyboxBuffers;
     std::vector<VkDeviceMemory> skyboxBuffersMemory;
@@ -1129,6 +1463,13 @@ private:
                 ImGui::Begin("Particle Settings");
                 const char* render_modes[] = { "Normal Particles", "Diagnostic Particles", "Velocity Field" };
                 ImGui::Combo("Render Mode", &render_mode, render_modes, IM_ARRAYSIZE(render_modes));
+                
+                ImGui::Separator();
+                ImGui::Text("Model Rendering");
+                const char* model_render_modes[] = { "Particles", "Mesh" };
+                ImGui::Combo("Model Render Mode", &model_render_mode, model_render_modes, IM_ARRAYSIZE(model_render_modes));
+                
+                ImGui::Separator();
                 ImGui::Checkbox("Enable IBM?", &enIBM);
                 ImGui::SliderFloat("Coupling Strength", &couplingStrength, 0.1f, 1.0f, "%.2f");
                 ImGui::Separator();
@@ -1252,6 +1593,7 @@ private:
         vkDestroyPipeline(device, skyboxPipeline, nullptr);
         vkDestroyPipeline(device, lagrangianPipeline, nullptr);
         vkDestroyPipeline(device, velocityPipeline, nullptr);
+        vkDestroyPipeline(device, meshPipeline, nullptr);
         vkDestroyPipelineLayout(device, graphicsPipelineLayout, nullptr);
 
         vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
@@ -1316,6 +1658,19 @@ private:
             vkFreeMemory(device, skyboxBuffersMemory[i], nullptr);
             vkDestroyBuffer(device, skyboxIndexBuffers[i], nullptr);
             vkFreeMemory(device, skyboxIndexBuffersMemory[i], nullptr);
+        }
+        for (size_t bodyIdx = 0; bodyIdx < rigidBodyCount; ++bodyIdx) {
+            for (size_t frameIdx = 0; frameIdx < MAX_FRAMES_IN_FLIGHT; ++frameIdx) {
+                size_t bufferIdx = bodyIdx * MAX_FRAMES_IN_FLIGHT + frameIdx;
+                if (!meshVertexBuffers.empty() && bufferIdx < meshVertexBuffers.size()) {
+                    vkDestroyBuffer(device, meshVertexBuffers[bufferIdx], nullptr);
+                    vkFreeMemory(device, meshVertexBuffersMemory[bufferIdx], nullptr);
+                }
+                if (!meshIndexBuffers.empty() && bufferIdx < meshIndexBuffers.size()) {
+                    vkDestroyBuffer(device, meshIndexBuffers[bufferIdx], nullptr);
+                    vkFreeMemory(device, meshIndexBuffersMemory[bufferIdx], nullptr);
+                }
+            }
         }
 
         ImGui_ImplVulkan_Shutdown();
@@ -1680,7 +2035,14 @@ private:
         flagsLayoutBinding.pImmutableSamplers = nullptr;
         flagsLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
-        std::array<VkDescriptorSetLayoutBinding, 5> bindings = { uboLayoutBinding, samplerLayoutBinding, lagrangianPointsLayoutBinding, velocityLayoutBinding, flagsLayoutBinding };
+        VkDescriptorSetLayoutBinding rigidBodyStateLayoutBinding{};
+        rigidBodyStateLayoutBinding.binding = 5;
+        rigidBodyStateLayoutBinding.descriptorCount = 1;
+        rigidBodyStateLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        rigidBodyStateLayoutBinding.pImmutableSamplers = nullptr;
+        rigidBodyStateLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        std::array<VkDescriptorSetLayoutBinding, 6> bindings = { uboLayoutBinding, samplerLayoutBinding, lagrangianPointsLayoutBinding, velocityLayoutBinding, flagsLayoutBinding, rigidBodyStateLayoutBinding };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -1879,6 +2241,22 @@ private:
         skyboxFragShaderStageInfo.pName = "main";
         VkPipelineShaderStageCreateInfo skyboxShaderStages[] = { skyboxVertShaderStageInfo, skyboxFragShaderStageInfo };
 
+        auto meshVertShaderCode = readFile("shaders/mesh_vert.spv");
+        auto meshFragShaderCode = readFile("shaders/mesh_frag.spv");
+        VkShaderModule meshVertShaderModule = createShaderModule(meshVertShaderCode);
+        VkShaderModule meshFragShaderModule = createShaderModule(meshFragShaderCode);
+        VkPipelineShaderStageCreateInfo meshVertShaderStageInfo{};
+        meshVertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        meshVertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        meshVertShaderStageInfo.module = meshVertShaderModule;
+        meshVertShaderStageInfo.pName = "main";
+        VkPipelineShaderStageCreateInfo meshFragShaderStageInfo{};
+        meshFragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        meshFragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        meshFragShaderStageInfo.module = meshFragShaderModule;
+        meshFragShaderStageInfo.pName = "main";
+        VkPipelineShaderStageCreateInfo meshShaderStages[] = { meshVertShaderStageInfo, meshFragShaderStageInfo };
+
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 
@@ -1957,10 +2335,17 @@ private:
         dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
         dynamicState.pDynamicStates = dynamicStates.data();
 
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = sizeof(uint32_t);
+
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pipelineLayoutInfo.setLayoutCount = 1;
         pipelineLayoutInfo.pSetLayouts = &graphicsDescriptorSetLayout;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
         if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &graphicsPipelineLayout) != VK_SUCCESS) {
             throw std::runtime_error("failed to create pipeline layout!");
@@ -2104,6 +2489,83 @@ private:
             }
         }
 
+        // mesh
+        {
+            auto meshBindingDescription = MeshVertex::getBindingDescription();
+            auto meshAttributeDescriptions = MeshVertex::getAttributeDescriptions();
+            vertexInputInfo.vertexBindingDescriptionCount = 1;
+            vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(meshAttributeDescriptions.size());
+            vertexInputInfo.pVertexBindingDescriptions = &meshBindingDescription;
+            vertexInputInfo.pVertexAttributeDescriptions = meshAttributeDescriptions.data();
+            inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+            VkPipelineRasterizationStateCreateInfo meshRasterizer{};
+            meshRasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            meshRasterizer.depthClampEnable = VK_FALSE;
+            meshRasterizer.rasterizerDiscardEnable = VK_FALSE;
+            meshRasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+            meshRasterizer.lineWidth = 1.0f;
+            meshRasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+            meshRasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+            meshRasterizer.depthBiasEnable = VK_FALSE;
+
+            VkPipelineDepthStencilStateCreateInfo meshDepthStencil{};
+            meshDepthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            meshDepthStencil.depthTestEnable = VK_TRUE;
+            meshDepthStencil.depthWriteEnable = VK_TRUE;
+            meshDepthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+            meshDepthStencil.depthBoundsTestEnable = VK_FALSE;
+            meshDepthStencil.minDepthBounds = 0.0f;
+            meshDepthStencil.maxDepthBounds = 1.0f;
+            meshDepthStencil.stencilTestEnable = VK_FALSE;
+            meshDepthStencil.front = {};
+            meshDepthStencil.back = {};
+
+            VkPipelineColorBlendAttachmentState meshColorBlendAttachment{};
+            meshColorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            meshColorBlendAttachment.blendEnable = VK_FALSE;
+            meshColorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+            meshColorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            meshColorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            meshColorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+            meshColorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            meshColorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+
+            VkPipelineColorBlendStateCreateInfo meshColorBlending{};
+            meshColorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            meshColorBlending.logicOpEnable = VK_FALSE;
+            meshColorBlending.logicOp = VK_LOGIC_OP_COPY;
+            meshColorBlending.attachmentCount = 1;
+            meshColorBlending.pAttachments = &meshColorBlendAttachment;
+            meshColorBlending.blendConstants[0] = 0.0f;
+            meshColorBlending.blendConstants[1] = 0.0f;
+            meshColorBlending.blendConstants[2] = 0.0f;
+            meshColorBlending.blendConstants[3] = 0.0f;
+
+            VkGraphicsPipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            pipelineInfo.flags = VK_PIPELINE_CREATE_DERIVATIVE_BIT;
+            pipelineInfo.stageCount = 2;
+            pipelineInfo.pStages = meshShaderStages;
+            pipelineInfo.pVertexInputState = &vertexInputInfo;
+            pipelineInfo.pInputAssemblyState = &inputAssembly;
+            pipelineInfo.pViewportState = &viewportState;
+            pipelineInfo.pRasterizationState = &meshRasterizer;
+            pipelineInfo.pMultisampleState = &multisampling;
+            pipelineInfo.pDepthStencilState = &meshDepthStencil;
+            pipelineInfo.pColorBlendState = &meshColorBlending;
+            pipelineInfo.pDynamicState = &dynamicState;
+            pipelineInfo.layout = graphicsPipelineLayout;
+            pipelineInfo.renderPass = renderPass;
+            pipelineInfo.subpass = 0;
+            pipelineInfo.basePipelineHandle = graphicsPipeline;
+            pipelineInfo.basePipelineIndex = -1;
+
+            if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &meshPipeline) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create mesh pipeline!");
+            }
+        }
+
         //// skybox
         //{
         //    VkVertexInputBindingDescription bindingDescription{};
@@ -2158,6 +2620,8 @@ private:
         vkDestroyShaderModule(device, wireframeVertShaderModule, nullptr);
         vkDestroyShaderModule(device, skyboxFragShaderModule, nullptr);
         vkDestroyShaderModule(device, skyboxVertShaderModule, nullptr);
+        vkDestroyShaderModule(device, meshFragShaderModule, nullptr);
+        vkDestroyShaderModule(device, meshVertShaderModule, nullptr);
     }
 
     void createSkyBoxPipeline() {
@@ -3046,7 +3510,7 @@ private:
                 body1.shape = RigidBodyShape::MESH;
                 body1.meshFilePath = "models/fan_pointcloud.glb";
                 body1.meshScale = 20.0f;
-                body1.meshCoordSystem = 1;
+                body1.meshCoordSystem = 0;
                 body1.rho = 1.0f;
                 body1.position = glm::vec3(Nx / 2.0f - 30.0f, Ny / 2.0f, Nz / 2.0f);
                 body1.orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
@@ -3059,11 +3523,13 @@ private:
                 body1.manualAngVel[0] = 0.0f;
                 body1.manualAngVel[1] = 0.02f;
                 body1.manualAngVel[2] = 0.0f;
-                rigidBodies.push_back(body1);
+                // rigidBodies.push_back(body1);
 
                 RigidBody body2;
-                body2.shape = RigidBodyShape::SPHERE;
-                body2.radius = 10.0f;
+                body2.shape = RigidBodyShape::MESH;
+                body2.meshFilePath = "models/sphere_pointcloud.glb";
+                body2.meshScale = 10.0f;
+                body2.meshCoordSystem = 0;
                 body2.rho = 1.0f;
                 body2.position = glm::vec3(Nx / 2.0f + 30.0f, Ny / 2.0f, Nz / 2.0f);
                 body2.orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
@@ -3411,6 +3877,75 @@ private:
             vkDestroyBuffer(device, stagingBuffer, nullptr);
             vkFreeMemory(device, stagingBufferMemory, nullptr);
         }
+
+        // mesh - load mesh for each rigid body
+        {
+            meshVerticesPerBody.resize(rigidBodyCount);
+            meshIndicesPerBody.resize(rigidBodyCount);
+            meshVertexBuffers.resize(rigidBodyCount * MAX_FRAMES_IN_FLIGHT);
+            meshVertexBuffersMemory.resize(rigidBodyCount * MAX_FRAMES_IN_FLIGHT);
+            meshIndexBuffers.resize(rigidBodyCount * MAX_FRAMES_IN_FLIGHT);
+            meshIndexBuffersMemory.resize(rigidBodyCount * MAX_FRAMES_IN_FLIGHT);
+            
+            for (size_t bodyIdx = 0; bodyIdx < rigidBodyCount; ++bodyIdx) {
+                std::string meshPath = rigidBodies[bodyIdx].meshFilePath;
+                size_t pos = meshPath.find("_pointcloud.glb");
+                if (pos != std::string::npos) {
+                    meshPath = meshPath.substr(0, pos) + ".glb";
+                }
+                
+                std::cout << "Loading mesh for body " << bodyIdx << ": " << meshPath << std::endl;
+                
+                if (loadMeshTrianglesFromGLB(meshPath, meshVerticesPerBody[bodyIdx], meshIndicesPerBody[bodyIdx])) {
+                    float scale = rigidBodies[bodyIdx].meshScale;
+                    int coordSystem = rigidBodies[bodyIdx].meshCoordSystem;
+                    
+                    for (auto& vertex : meshVerticesPerBody[bodyIdx]) {
+                        vertex.pos *= scale;
+                        
+                        if (coordSystem == 0) {
+                            float tmp = vertex.pos.y;
+                            vertex.pos.y = vertex.pos.z;
+                            vertex.pos.z = tmp;
+                            
+                            tmp = vertex.normal.y;
+                            vertex.normal.y = vertex.normal.z;
+                            vertex.normal.z = tmp;
+                        }
+                    }
+                    
+                    std::cout << "  Loaded " << meshVerticesPerBody[bodyIdx].size() << " vertices, " 
+                              << meshIndicesPerBody[bodyIdx].size() << " indices for body " << bodyIdx << std::endl;
+                } else {
+                    std::cerr << "  Failed to load mesh for body " << bodyIdx << std::endl;
+                }
+            }
+            
+            // Create vertex buffers for each rigid body
+            for (size_t bodyIdx = 0; bodyIdx < rigidBodyCount; ++bodyIdx) {
+                if (!meshVerticesPerBody[bodyIdx].empty()) {
+                    VkDeviceSize bufferSize = sizeof(MeshVertex) * meshVerticesPerBody[bodyIdx].size();
+                    
+                    VkBuffer stagingBuffer;
+                    VkDeviceMemory stagingBufferMemory;
+                    createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+                    void* data;
+                    vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+                    memcpy(data, meshVerticesPerBody[bodyIdx].data(), (size_t)bufferSize);
+                    vkUnmapMemory(device, stagingBufferMemory);
+
+                    for (size_t frameIdx = 0; frameIdx < MAX_FRAMES_IN_FLIGHT; frameIdx++) {
+                        size_t bufferIdx = bodyIdx * MAX_FRAMES_IN_FLIGHT + frameIdx;
+                        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, meshVertexBuffers[bufferIdx], meshVertexBuffersMemory[bufferIdx]);
+                        copyBuffer(stagingBuffer, meshVertexBuffers[bufferIdx], bufferSize);
+                    }
+
+                    vkDestroyBuffer(device, stagingBuffer, nullptr);
+                    vkFreeMemory(device, stagingBufferMemory, nullptr);
+                }
+            }
+        }
     }
 
     void createIndexBuffers() {
@@ -3461,6 +3996,33 @@ private:
 
             vkDestroyBuffer(device, stagingBuffer, nullptr);
             vkFreeMemory(device, stagingBufferMemory, nullptr);
+        }
+
+        // mesh - create index buffers for each rigid body
+        {
+            for (size_t bodyIdx = 0; bodyIdx < rigidBodyCount; ++bodyIdx) {
+                if (!meshIndicesPerBody[bodyIdx].empty()) {
+                    VkDeviceSize bufferSize = sizeof(uint32_t) * meshIndicesPerBody[bodyIdx].size();
+                    
+                    VkBuffer stagingBuffer;
+                    VkDeviceMemory stagingBufferMemory;
+                    createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+                    void* data;
+                    vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+                    memcpy(data, meshIndicesPerBody[bodyIdx].data(), (size_t)bufferSize);
+                    vkUnmapMemory(device, stagingBufferMemory);
+
+                    for (size_t frameIdx = 0; frameIdx < MAX_FRAMES_IN_FLIGHT; frameIdx++) {
+                        size_t bufferIdx = bodyIdx * MAX_FRAMES_IN_FLIGHT + frameIdx;
+                        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, meshIndexBuffers[bufferIdx], meshIndexBuffersMemory[bufferIdx]);
+                        copyBuffer(stagingBuffer, meshIndexBuffers[bufferIdx], bufferSize);
+                    }
+
+                    vkDestroyBuffer(device, stagingBuffer, nullptr);
+                    vkFreeMemory(device, stagingBufferMemory, nullptr);
+                }
+            }
         }
     }
 
@@ -3773,7 +4335,7 @@ private:
             flagsBufferInfo.offset = 0;
             flagsBufferInfo.range = Nxyz * sizeof(uint32_t);
 
-            std::array<VkWriteDescriptorSet, 5> descriptorWrites{};
+            std::array<VkWriteDescriptorSet, 6> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = graphicsDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -3814,7 +4376,21 @@ private:
             descriptorWrites[4].descriptorCount = 1;
             descriptorWrites[4].pBufferInfo = &flagsBufferInfo;
 
-            vkUpdateDescriptorSets(device, descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
+            
+            VkDescriptorBufferInfo rigidBodyStateBufferInfo{};
+            rigidBodyStateBufferInfo.buffer = rigidBodyStateBuffers[i];
+            rigidBodyStateBufferInfo.offset = 0;
+            rigidBodyStateBufferInfo.range = sizeof(RigidBodyState) * rigidBodyCount;
+            
+            descriptorWrites[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[5].dstSet = graphicsDescriptorSets[i];
+            descriptorWrites[5].dstBinding = 5;
+            descriptorWrites[5].dstArrayElement = 0;
+            descriptorWrites[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[5].descriptorCount = 1;
+            descriptorWrites[5].pBufferInfo = &rigidBodyStateBufferInfo;
+            
+            vkUpdateDescriptorSets(device, 6, descriptorWrites.data(), 0, nullptr);
         }
     }
 
@@ -4322,7 +4898,7 @@ private:
 
                 constexpr uint STRIDE = 6u;
                 vkCmdDraw(commandBuffer, (Nx / STRIDE) * (Ny / STRIDE) * (Nz / STRIDE) * 2, 1, 0, 0);
-            } else {
+            } else if (render_mode == 0 || render_mode == 1) {
                 VkPipeline currentPipeline = (render_mode == 1) ? diagnosticPipeline : graphicsPipeline;
                 vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
                 vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &graphicsDescriptorSets[currentFrame], 0, nullptr);
@@ -4348,8 +4924,68 @@ private:
             }
         }
 
-        // Lagrangian Points rendering
+        // Model particle rendering (model_render_mode = 0)
+        if (model_render_mode == 0) {
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, lagrangianPipeline);
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &graphicsDescriptorSets[currentFrame], 0, nullptr);
+
+            VkViewport viewport{};
+            viewport.x = 0.0f;
+            viewport.y = 0.0f;
+            viewport.width = (float)swapChainExtent.width;
+            viewport.height = (float)swapChainExtent.height;
+            viewport.minDepth = 0.0f;
+            viewport.maxDepth = 1.0f;
+            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+            VkRect2D scissor{};
+            scissor.offset = { 0, 0 };
+            scissor.extent = swapChainExtent;
+            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+            vkCmdDraw(commandBuffer, lagrangianPointCount, 1, 0, 0);
+        }
+
+        // Model mesh rendering (model_render_mode = 1)
         {
+            bool shouldRenderMesh = (model_render_mode == 1) && !meshVertexBuffers.empty() && !meshIndexBuffers.empty();
+            
+            if (shouldRenderMesh) {
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
+                vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &graphicsDescriptorSets[currentFrame], 0, nullptr);
+
+                VkViewport viewport{};
+                viewport.x = 0.0f;
+                viewport.y = 0.0f;
+                viewport.width = (float)swapChainExtent.width;
+                viewport.height = (float)swapChainExtent.height;
+                viewport.minDepth = 0.0f;
+                viewport.maxDepth = 1.0f;
+                vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+                VkRect2D scissor{};
+                scissor.offset = { 0, 0 };
+                scissor.extent = swapChainExtent;
+                vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+                for (uint32_t bodyIdx = 0; bodyIdx < rigidBodyCount; ++bodyIdx) {
+                    if (!meshVerticesPerBody[bodyIdx].empty() && !meshIndicesPerBody[bodyIdx].empty()) {
+                        size_t vertexBufferIdx = bodyIdx * MAX_FRAMES_IN_FLIGHT + currentFrame;
+                        size_t indexBufferIdx = bodyIdx * MAX_FRAMES_IN_FLIGHT + currentFrame;
+                        
+                        VkDeviceSize offsets[] = { 0 };
+                        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &meshVertexBuffers[vertexBufferIdx], offsets);
+                        vkCmdBindIndexBuffer(commandBuffer, meshIndexBuffers[indexBufferIdx], 0, VK_INDEX_TYPE_UINT32);
+                        
+                        vkCmdPushConstants(commandBuffer, graphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(uint32_t), &bodyIdx);
+                        vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(meshIndicesPerBody[bodyIdx].size()), 1, 0, 0, 0);
+                    }
+                }
+            }
+        }
+
+        // Lagrangian Points rendering (IBM boundary points, only when model particle mode is active)
+        if (enIBM && model_render_mode == 0) {
             vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, lagrangianPipeline);
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipelineLayout, 0, 1, &graphicsDescriptorSets[currentFrame], 0, nullptr);
 
@@ -4961,9 +5597,6 @@ private:
 
         std::vector<VkExtensionProperties> availableExtensions(extensionCount);
         vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
-        for (uint i = 0; i < extensionCount; ++i) {
-            std::cout << availableExtensions[i].extensionName << std::endl;
-        }
 
         std::set<std::string> requiredExtensions(deviceExtensions.begin(), deviceExtensions.end());
 
