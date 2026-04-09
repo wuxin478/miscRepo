@@ -1,0 +1,193 @@
+#version 450
+#extension GL_EXT_scalar_block_layout : require
+
+layout (std430, binding = 0) uniform RayMarchUBO {
+    uint Nx;
+    uint Ny;
+    uint Nz;
+    uint render_mode;
+    float maxVorticity;
+    float vorticityThreshold;
+    float stepSize;
+    uint maxSteps;
+    uint padding3;
+    mat4 invViewProj;
+    vec4 cameraPos;
+    vec4 volumeMin;
+    vec4 volumeMax;
+} ubo;
+
+layout(binding = 1, set = 0) uniform sampler3D vorticityTexture;
+
+layout(binding = 2, set = 0, rgba8) uniform writeonly image2D outputImage;
+
+layout(binding = 3, set = 0) uniform sampler2D sceneColor;
+
+layout(binding = 4, set = 0) uniform sampler2D sceneDepth;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+const float EPSILON = 1e-5f;
+const float MAX_DISTANCE = 1000.0f;
+const float NEAR_PLANE = 0.1f;
+const float FAR_PLANE = 10.0f;
+
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+struct HitInfo {
+    bool hit;
+    float tNear;
+    float tFar;
+};
+
+HitInfo intersectAABB(Ray ray, vec3 boxMin, vec3 boxMax) {
+    HitInfo hit;
+    hit.hit = false;
+    hit.tNear = 0.0f;
+    hit.tFar = MAX_DISTANCE;
+
+    vec3 invDir = ray.direction;
+
+    // 安全处理：将接近0的分量替换为一个极大值的倒数
+    // 这样当方向分量为0时，t0/t1会趋于无穷大或无穷小，但仍能正确参与min/max比较
+    const float SAFE_EPS = 1e-8;
+    vec3 safeDir = mix(ray.direction, vec3(SAFE_EPS), lessThan(abs(ray.direction), vec3(SAFE_EPS)));
+    vec3 safeInv = 1.0f / safeDir;
+
+    vec3 t0 = (boxMin - ray.origin) * safeInv;
+    vec3 t1 = (boxMax - ray.origin) * safeInv;
+
+    vec3 tmin = min(t0, t1);
+    vec3 tmax = max(t0, t1);
+
+    float tEnter = max(max(tmin.x, tmin.y), tmin.z);
+    float tExit  = min(min(tmax.x, tmax.y), tmax.z);
+
+    if (tEnter < tExit && tExit > 0.0f) {
+        hit.hit = true;
+        hit.tNear = max(tEnter, 0.0f);
+        hit.tFar  = tExit;
+    }
+
+    return hit;
+}
+
+vec3 worldToVolumeUVW(vec3 worldPos) {
+    vec3 t =  (worldPos - ubo.volumeMin.xyz) / (ubo.volumeMax.xyz - ubo.volumeMin.xyz);
+    return clamp(t, 0.0f, 1.0f);
+}
+
+vec4 sampleVorticity(vec3 uvw) {
+    if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
+        return vec4(0.0f);
+    }
+    return texture(vorticityTexture, uvw);
+}
+
+float linearizeDepth(float depthNDC, float near, float far) {
+    float ndcZ = depthNDC * 2.0f - 1.0f;
+    return (2.0f * near * far) / (far + near - ndcZ * (far - near));
+}
+
+void main() {
+    uvec3 globalSize = gl_NumWorkGroups * gl_WorkGroupSize;
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint width = globalSize.x;
+    uint height = globalSize.y;
+
+    if (x >= width || y >= height) {
+        return;
+    }
+
+    vec2 texCoord = vec2(float(x) / float(width), float(y) / float(height));
+
+    float ndcX = (2.0f * float(x) / float(width)) - 1.0f;
+    float ndcY = (2.0f * float(y) / float(height)) - 1.0f;
+
+    vec4 nearPoint = ubo.invViewProj * vec4(ndcX, ndcY, -1.0f, 1.0f);
+    nearPoint = nearPoint / nearPoint.w;
+
+    vec4 farPoint = ubo.invViewProj * vec4(ndcX, ndcY, 1.0f, 1.0f);
+    farPoint = farPoint / farPoint.w;
+
+    vec3 rayOrigin = ubo.cameraPos.xyz;
+    vec3 rayDir = normalize(farPoint.xyz - nearPoint.xyz);
+
+    Ray ray;
+    ray.origin = rayOrigin;
+    ray.direction = rayDir;
+
+    HitInfo hit = intersectAABB(ray, ubo.volumeMin.xyz, ubo.volumeMax.xyz);
+
+    float sceneDepthVal = texture(sceneDepth, texCoord).r;
+    vec4 scenePos = ubo.invViewProj * vec4(ndcX, ndcY, sceneDepthVal, 1.0f);
+    float t_geom = (sceneDepthVal >= 1.0f) ? MAX_DISTANCE : length(scenePos.xyz / scenePos.w - ubo.cameraPos.xyz);
+
+    if (!hit.hit) {
+        vec3 objColor = texture(sceneColor, texCoord).rgb;
+        imageStore(outputImage, ivec2(x, y), vec4(objColor, 1.0f));
+        return;
+    }
+
+    float tMaxEffective = min(hit.tFar, t_geom);
+
+    if (hit.tNear >= tMaxEffective) {
+        vec3 objColor = texture(sceneColor, texCoord).rgb;
+        imageStore(outputImage, ivec2(x, y), vec4(objColor, 1.0f));
+        return;
+    }
+
+    vec4 accumColor = vec4(0.0f);
+    float t = hit.tNear;
+
+    vec3 volumeExtent = ubo.volumeMax.xyz - ubo.volumeMin.xyz;
+    float voxelSize = min(min(volumeExtent.x / float(ubo.Nx),
+                             volumeExtent.y / float(ubo.Ny)),
+                             volumeExtent.z / float(ubo.Nz));
+    float stepSize = ubo.stepSize * voxelSize;
+
+    for (uint step = 0u; step < ubo.maxSteps && t < tMaxEffective; step++) {
+        vec3 pos = ray.origin + t * ray.direction;
+        vec3 uvw = worldToVolumeUVW(pos);
+
+        if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
+            t += stepSize;
+            continue;
+        }
+
+        vec4 vorticity = sampleVorticity(uvw);
+        vec3 vort = vorticity.xyz;
+        float magnitude = length(vort);
+
+        if (magnitude < EPSILON || magnitude < ubo.vorticityThreshold) {
+            t += stepSize;
+            continue;
+        }
+
+        vec3 dir = vort / magnitude;
+        vec3 colorDir = (dir + 1.0f) * 0.5f;
+        float s = clamp(magnitude / max(ubo.maxVorticity, EPSILON), 0.0f, 1.0f);
+
+        vec3 col = mix(vec3(0.5f), colorDir, s);
+
+        float alpha = s * 0.95f;
+        alpha = clamp(alpha, 0.0f, 1.0f);
+
+        accumColor.rgb += (1.0f - accumColor.a) * alpha * col;
+        accumColor.a += (1.0f - accumColor.a) * alpha;
+
+        if (accumColor.a >= 0.99f) {
+            break;
+        }
+
+        t += stepSize;
+    }
+
+    vec3 objColor = texture(sceneColor, texCoord).rgb;
+    vec3 finalColor = accumColor.rgb + (1.0f - accumColor.a) * objColor;
+    imageStore(outputImage, ivec2(x, y), vec4(finalColor, 1.0f));
+}

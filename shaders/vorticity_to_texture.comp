@@ -1,0 +1,105 @@
+#version 450
+#extension GL_EXT_scalar_block_layout : require
+
+layout (std430, binding = 0) uniform SimulateUBO {
+    uint Nx;
+    uint Ny;
+    uint Nz;
+    uint Nxyz;
+    uint particleCount;
+    float particleRho;
+    float niu;
+    float tau;
+    float inv_tau;
+    float fx;
+    float fy;
+    float fz;
+    float dt;
+    uint t;
+    uint render_mode;
+    uint fixed_point_iteration;
+    uint lagrangianPointCount;
+    float couplingStrength;
+    uint rigidBodyCount;
+    uint useEmitter;
+    float spawnRate;
+    vec4 emitterPos;
+    vec4 emitterVel;
+} ubo;
+
+layout(std430, binding = 2) buffer VelocityBuffer {
+    float vels[];
+};
+
+layout(std430, binding = 18) buffer DebugBuffer {
+    vec4 debugData[];
+};
+
+layout(binding = 19, set = 0, rgba32f) uniform writeonly image3D vorticityVolume;
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+uvec3 coordinates(const uint n) {
+    const uint t = uint(n % (ubo.Nx * ubo.Ny));
+    return uvec3(t % ubo.Nx, t / ubo.Nx, uint(n / (ubo.Nx * ubo.Ny)));
+}
+
+vec3 calculate_vorticity(vec3 pos) {
+    ivec3 lattice = ivec3(pos);
+
+    if (lattice.x < 1 || lattice.x >= int(ubo.Nx) - 1 ||
+        lattice.y < 1 || lattice.y >= int(ubo.Ny) - 1 ||
+        lattice.z < 1 || lattice.z >= int(ubo.Nz) - 1) {
+        return vec3(0.0f);
+    }
+
+    uint x = uint(lattice.x);
+    uint y = uint(lattice.y);
+    uint z = uint(lattice.z);
+
+    uint idx_xp = (x + 1u) + (y + z * ubo.Ny) * ubo.Nx;
+    uint idx_xm = (x - 1u) + (y + z * ubo.Ny) * ubo.Nx;
+    uint idx_yp = x + ((y + 1u) + z * ubo.Ny) * ubo.Nx;
+    uint idx_ym = x + ((y - 1u) + z * ubo.Ny) * ubo.Nx;
+    uint idx_zp = x + (y + (z + 1u) * ubo.Ny) * ubo.Nx;
+    uint idx_zm = x + (y + (z - 1u) * ubo.Ny) * ubo.Nx;
+
+    float u_yp = vels[idx_yp];
+    float u_ym = vels[idx_ym];
+    float u_zp = vels[idx_zp];
+    float u_zm = vels[idx_zm];
+
+    float v_xp = vels[ubo.Nxyz + idx_xp];
+    float v_xm = vels[ubo.Nxyz + idx_xm];
+    float v_zp = vels[ubo.Nxyz + idx_zp];
+    float v_zm = vels[ubo.Nxyz + idx_zm];
+
+    float w_xp = vels[2u * ubo.Nxyz + idx_xp];
+    float w_xm = vels[2u * ubo.Nxyz + idx_xm];
+    float w_yp = vels[2u * ubo.Nxyz + idx_yp];
+    float w_ym = vels[2u * ubo.Nxyz + idx_ym];
+
+    float du_dy = (u_yp - u_ym) * 0.5f;
+    float du_dz = (u_zp - u_zm) * 0.5f;
+    float dv_dx = (v_xp - v_xm) * 0.5f;
+    float dv_dz = (v_zp - v_zm) * 0.5f;
+    float dw_dx = (w_xp - w_xm) * 0.5f;
+    float dw_dy = (w_yp - w_ym) * 0.5f;
+
+    float omega_x = dw_dy - dv_dz;
+    float omega_y = du_dz - dw_dx;
+    float omega_z = dv_dx - du_dy;
+
+    return vec3(omega_x, omega_y, omega_z);
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= ubo.Nxyz) return;
+
+    uvec3 coor = coordinates(index);
+    ivec3 voxelCoord = ivec3(coor.x, coor.y, coor.z);
+
+    vec3 vorticity = calculate_vorticity(vec3(coor));
+    imageStore(vorticityVolume, voxelCoord, vec4(vorticity, 0.0f));
+}
